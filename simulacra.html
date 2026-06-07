@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Simulacra [ConsciousNode SoftWorks]</title>
 <!-- 
   Simulacra
@@ -181,7 +181,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
 
 .sensorium-layout {
   display: grid;
-  grid-template-columns: 320px 1fr 320px;
+  grid-template-columns: clamp(200px, 22vw, 320px) 1fr clamp(200px, 22vw, 320px);
   grid-template-rows: 1fr 220px;
   height: 100%;
   gap: 0;
@@ -500,7 +500,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
 }
 
 /* Responsive */
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .output-layout {
     grid-template-columns: 1fr;
     grid-template-rows: repeat(4, 280px);
@@ -514,7 +514,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
 
 
 /* Responsive sensorium */
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .sensorium-layout {
     grid-template-columns: 1fr;
     grid-template-rows: auto;
@@ -1670,12 +1670,15 @@ class SimulacraBlock {
     const prevX2 = state.prevX2 || new Float32Array(dim);
 
     // Layer Norm 1
-    const x_ln = this.ln1.forward(x).out;
+    const ln1Res = this.ln1.forward(x);
+    const x_ln = ln1Res.out;
 
     // Token shift (mu=0.5 fixed; learned mu removed with WKV)
-    const xr = this._tokenShift(x_ln, prevX, 0.5);
-    const xk = this._tokenShift(x_ln, prevX, 0.5);
-    const xv = this._tokenShift(x_ln, prevX, 0.5);
+    // xr, xk, xv share the same shift — compute once.
+    const xShift = this._tokenShift(x_ln, prevX, 0.5);
+    const xr = xShift;
+    const xk = xShift;
+    const xv = xShift;
 
     const r = SimulacraBlock.sigmoid(this.W_x_r.forward(xr));
     // k and v: local content signal (v0.2 — real gradient paths, not dropped)
@@ -1736,8 +1739,12 @@ class SimulacraBlock {
 
     // Channel mixing (FFN — unchanged from v7)
     const h_ln  = this.ln2.forward(h).out;
-    const rx2   = this._tokenShift(h_ln, prevX2, 0.5);
-    const kx2   = this._tokenShift(h_ln, prevX2, 0.5);
+    // rx2Shift and kx2Shift share the same shift — compute once.
+    const cmShift  = this._tokenShift(h_ln, prevX2, 0.5);
+    const rx2Shift = cmShift;
+    const kx2Shift = cmShift;
+    const rx2   = this.W_x_rx2.forward(rx2Shift);    // learned projection — W_x_rx2 now active
+    const kx2   = this.W_x_kx2.forward(kx2Shift);    // learned projection — W_x_kx2 now active
     const r2    = SimulacraBlock.sigmoid(this.Wr2.forward(rx2));
     const k_cm  = this.Wk2.forward(kx2);
     const k_sq  = k_cm.map(v => Math.max(0, v) ** 2);
@@ -1761,9 +1768,13 @@ class SimulacraBlock {
         kvSignal,
         rosaOut, prediction,
         // Channel mixing activations
-        rx2, k_sq, r2,
+        rx2, kx2, k_sq, r2,
+        k_cm,        // needed for squared-ReLU backward (Fix 5)
+        cmix,        // needed for Wr2 backward (Fix 5)
+        rx2Shift, kx2Shift,  // needed for W_x_rx2/W_x_kx2 backward (Fix 6)
         h_ln,
-        // LayerNorm caches handled by ln1/ln2 internally
+        // LayerNorm caches
+        ln1: ln1Res.cache,
       }
     };
   }
@@ -1776,11 +1787,46 @@ class SimulacraBlock {
     const dim = this.dim;
 
     // Channel mix backward (Wv2, Wk2, Wr2)
-    const dH     = new Float32Array(dim);
-    const dCmix  = new Float32Array(dim);
-    for (let i = 0; i < dim; i++) { dH[i] += dOut[i]; dCmix[i] = dOut[i] * (cache.r2[i] || 0); }
-    if (this.Wv2.backward) this.Wv2.backward(dCmix, cache.k_sq, learningRate);
-    if (this.Wr2.backward) this.Wr2.backward(dH, cache.rx2, learningRate);
+    // Forward: out[i] = h[i] + r2[i] * cmix[i]
+    // dH[i]    = dOut[i]                  (residual path through h)
+    // dCmix[i] = dOut[i] * r2[i]          (cmix path)
+    // dr2[i]   = dOut[i] * cmix[i]        (r2-gate path)
+    const dH    = new Float32Array(dim);
+    const dCmix = new Float32Array(dim);
+    const dWr2  = new Float32Array(dim);
+    for (let i = 0; i < dim; i++) {
+      dH[i]    = dOut[i];
+      dCmix[i] = dOut[i] * (cache.r2[i] || 0);
+      // Sigmoid backward for Wr2 gate: dr2 * r2 * (1 - r2)
+      const dr2i = dOut[i] * (cache.cmix ? cache.cmix[i] : 0);
+      dWr2[i] = dr2i * (cache.r2[i] || 0) * (1 - (cache.r2[i] || 0));
+    }
+
+    // Wv2 backward — captures d_k_sq (gradient w.r.t. Wv2 input k_sq)
+    const d_k_sq = this.Wv2.backward ? this.Wv2.backward(dCmix, cache.k_sq, learningRate) : new Float32Array(this.dimFFN);
+
+    // Squared-ReLU backward: d_k_cm[i] = d_k_sq[i] * 2 * max(0, k_cm[i])
+    const d_k_cm = new Float32Array(this.dimFFN);
+    if (cache.k_cm) {
+      for (let i = 0; i < this.dimFFN; i++) {
+        d_k_cm[i] = (d_k_sq[i] || 0) * 2 * Math.max(0, cache.k_cm[i]);
+      }
+    }
+
+    // Wk2 backward — correct gradient (d_k_cm) and correct activation (kx2)
+    if (this.Wk2.backward) this.Wk2.backward(d_k_cm, cache.rx2, learningRate);
+
+    // Wr2 backward — full gradient including r2-gate path
+    if (this.Wr2.backward) this.Wr2.backward(dWr2, cache.rx2, learningRate);
+
+    // W_x_rx2 backward — gradient flows from Wr2 through the projection
+    if (this.W_x_rx2.backward) {
+      this.W_x_rx2.backward(dWr2, cache.rx2Shift || new Float32Array(this.dim), learningRate);
+    }
+    // W_x_kx2 backward
+    if (this.W_x_kx2.backward) {
+      this.W_x_kx2.backward(d_k_cm, cache.kx2Shift || new Float32Array(this.dim), learningRate);
+    }
 
     // Token mix backward
     const dTmix = new Float32Array(dim);
@@ -1813,7 +1859,16 @@ class SimulacraBlock {
     if (this.W_x_k.backward) this.W_x_k.backward(dK, cache.xk, learningRate);
     if (this.W_x_v.backward) this.W_x_v.backward(dV, cache.xv, learningRate);
 
-    return new Float32Array(dim); // dX for previous block
+    // dH is the gradient w.r.t. h (the post-tmix residual pre-channel-mix).
+    // x's residual path: h = x + tmix_out + sheafDelta (sheafDelta is stop-gradient).
+    // Therefore dX = dH. LanguageModel.backward() applies ln1.backward(dH, ln1Cache) to get pre-ln1 dX.
+    return {
+      gradBlockIn: dH,
+      gradStatePrev: {
+        prevX:  new Float32Array(dim),
+        prevX2: new Float32Array(dim)
+      }
+    };
   }
 
   // ROSA state for .simpip serialization
@@ -3585,10 +3640,9 @@ class Trainer {
 
     for (let start = 0; start < len - 1; start += chunkSize) {
       const stateCopy = state.map(s => ({
-        prevX: s.prevX ? new Float32Array(s.prevX) : null,
+        prevX:  s.prevX  ? new Float32Array(s.prevX)  : null,
         prevX2: s.prevX2 ? new Float32Array(s.prevX2) : null,
-        num: s.num ? new Float32Array(s.num) : null,
-        den: s.den ? new Float32Array(s.den) : null
+        step:   s.step   || 0
       }));
       checkpoints.push({ start, state: stateCopy });
       const end = Math.min(start + chunkSize, len - 1);
@@ -3610,7 +3664,10 @@ class Trainer {
         currentState = res.state;
       }
 
-      let stateGrads = this.model.blocks.map(() => ({ num: new Float32Array(this.model.cfg.dim), den: new Float32Array(this.model.cfg.dim) }));
+      let stateGrads = this.model.blocks.map(() => ({
+        prevX:  new Float32Array(this.model.cfg.dim),
+        prevX2: new Float32Array(this.model.cfg.dim)
+      }));
 
       for (let j = acts.length - 1; j >= 0; j--) {
         const targetId = tokens[start + j + 1];
@@ -3640,7 +3697,7 @@ self.onmessage = async function(e) {
     let tokens = new Uint32Array(bytes.length);
     for(let i=0; i<bytes.length; i++) tokens[i] = bytes[i];
     const vocab = {}; const merges = [];
-    for(let i=0; i<256; i++) vocab[i] = String.fromCharCode(i);
+    for(let i=0; i<256; i++) vocab[i] = [i];
     let nextId = 256;
     for(let m = 0; m < (targetVocab - 256); m++) {
       if (tokens.length < 2) break;
@@ -3654,7 +3711,7 @@ self.onmessage = async function(e) {
       if (maxCount < 2) break;
       const left = Math.floor(bestKey / 65536), right = bestKey % 65536;
       const newId = nextId++;
-      vocab[newId] = (vocab[left] || '') + (vocab[right] || '');
+      vocab[newId] = (vocab[left] || []).concat(vocab[right] || []);
       merges.push([bestKey, newId]);
       const nt = new Uint32Array(tokens.length);
       let j=0, i=0;
@@ -3724,7 +3781,15 @@ class NanoTokenizer {
 
   decode(ids) {
     const vocabMap = new Map(Object.entries(this.vocab).map(([k,v]) => [parseInt(k), v]));
-    return ids.map(id => vocabMap.get(id) || '').join('');
+    const allBytes = [];
+    for (const id of ids) {
+      const entry = vocabMap.get(id);
+      if (Array.isArray(entry)) { for (const b of entry) allBytes.push(b); }
+      // fallback: if entry is already a string (legacy), push codepoints
+      else if (typeof entry === 'string') { for (const ch of entry) allBytes.push(ch.charCodeAt(0) & 0xFF); }
+    }
+    try { return new TextDecoder('utf-8', { fatal: false }).decode(new Uint8Array(allBytes)); }
+    catch { return allBytes.map(b => String.fromCharCode(b)).join(''); }
   }
 }
 

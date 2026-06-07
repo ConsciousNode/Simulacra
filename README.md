@@ -189,3 +189,37 @@ Predecessor credits: BlinkDL (RWKV-8 ROSA design), Kehai (v7 BPTT derivation), V
 
 *ConsciousNode SoftWorks — Xinu philosophy: single file, zero dependencies, offline-first.*
 
+
+---
+
+## Changelog
+
+### v0.1.1 — 2026-06-07
+
+**Patch applied via Simulacra Patch Prompt (Kehai Interim / Antigravity)**
+
+#### Bug fixes
+
+- **TextDecoder decode path** — Base BPE vocab (bytes 0–255) was initialized with `String.fromCharCode(i)`, producing Latin-1 strings for bytes 128–255. Multi-byte UTF-8 sequences (emoji, CJK, Arabic, etc.) were mangled before reaching ROSA. Fixed: base vocab entries are now raw byte arrays `[i]`; merges concatenate arrays; `NanoTokenizer.decode()` collects all bytes and passes through `TextDecoder('utf-8')`. Emotional content encoded as emoji in soul corpora now survives the full training pipeline.
+
+- **Block.backward() return type** — Returned a bare `Float32Array` instead of `{ gradBlockIn, gradStatePrev }`. `LanguageModel.backward()` checks for `result.gradBlockIn`; it was always missing, so inter-block gradient propagation always hit the fallback branch. Fixed: backward now returns the correct object type.
+
+- **Missing ln1 cache** — `SimulacraBlock.forward()` discarded the `LayerNorm` cache for `ln1`. `LanguageModel.backward()` called `ln1.backward(grad, undefined)`; `LayerNorm.backward` returns zeros on undefined cache. Inter-block gradient signal was silently collapsing. Fixed: `ln1Res.cache` captured and stored in block caches.
+
+- **Channel mix backward — squared-ReLU chain rule absent** — `Wv2.backward()` return value (gradient w.r.t. `k_sq`) was discarded. `Wk2.backward()` received `dCmix` (wrong gradient) and `k_sq` (wrong activation). The squared-ReLU Jacobian (`d_k_cm[i] = d_k_sq[i] * 2 * max(0, k_cm[i])`) was entirely missing. Fixed: `d_k_sq` captured, chain rule applied, `Wk2` receives correct `d_k_cm` through `kx2` activation. `k_cm` and `cmix` added to caches.
+
+- **Wr2 missing gate gradient** — Wr2 only received the residual path gradient (`dOut`), missing the `r2 * cmix` product gradient (`dOut[i] * cmix[i]`). Fixed: full sigmoid-backward gradient computed for Wr2.
+
+- **Dead weights W_x_rx2 and W_x_kx2** — Allocated, initialized, run through the optimizer every step, but never called in `forward()`. Now wired as learned input projections before Wr2 and Wk2 in the channel mix. Backward calls added.
+
+- **OOMB stateGrads v7 shape** — `stateGrads` initialized with `{ num, den }` (v7 WKV fields). v8 ROSA state is `{ prevX, prevX2, step }`. Fixed: stateGrads and trainSequence checkpoint copy updated to v8 shape.
+
+#### Improvements
+
+- **Redundant token shifts deduplicated** — `xr`, `xk`, `xv` computed from identical `_tokenShift(x_ln, prevX, 0.5)` calls. Now computed once as `xShift`. Same for channel mix: `rx2Shift` / `kx2Shift` alias a single `cmShift`. Three allocations → one.
+
+#### Display
+
+- **Viewport meta** — Removed `maximum-scale=1.0, user-scalable=no`. Browser zoom now works.
+- **Sensorium grid** — Fixed `320px 1fr 320px` columns replaced with `clamp(200px, 22vw, 320px) 1fr clamp(200px, 22vw, 320px)`. Layout now responds to viewport width.
+- **Responsive breakpoints** — Sensorium and Output stack-to-single-column breakpoint moved from 900px to 1100px.
