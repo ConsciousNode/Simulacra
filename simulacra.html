@@ -67,13 +67,14 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body, html { height: 100%; background: var(--bg-primary); color: var(--text-main); font-family: var(--font-sans); font-size: 14px; overflow: hidden; }
+body { display: flex; flex-direction: column; }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
 
-#app-container { display: flex; flex-direction: column; height: 100vh; width: 100vw; }
+#app-container { display: flex; flex-direction: column; height: 100vh; width: 100vw; overflow: hidden; }
 
 header { display: flex; align-items: center; padding: 16px 24px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); z-index: 20; box-shadow: 0 2px 10px rgba(0,0,0,0.3); flex-wrap: wrap; gap: 12px; }
 header h1 { color: var(--accent); font-size: 20px; font-weight: 800; font-family: var(--font-mono); letter-spacing: -0.5px; margin-right: 8px; }
@@ -102,7 +103,9 @@ body:has(#route-io:checked)       .nav-tab[for="route-io"],
 body:has(#route-sensorium:checked) .nav-tab[for="route-sensorium"],
 body:has(#route-output:checked)   .nav-tab[for="route-output"] { color: var(--accent); border-bottom-color: var(--accent); background: var(--bg-primary); }
 
-.screen { display: none; height: 100%; overflow-y: auto; overflow-x: hidden; padding: 24px; gap: 24px; align-content: flex-start; flex: 1; }
+/* Screen area fills all space between nav and footer */
+.screen-wrapper { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.screen { display: none; overflow-y: auto; overflow-x: hidden; padding: 24px; gap: 24px; align-content: flex-start; flex: 1; min-height: 0; }
 body:has(#route-setup:checked)     #screen-setup     { display: flex; flex-direction: column; }
 body:has(#route-train:checked)     #screen-train     { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
 body:has(#route-align:checked)     #screen-align     { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
@@ -177,13 +180,14 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
 /* ╔══════════════════════════════════════════════════╗
    ║               SENSORIUM STYLES                    ║
    ╚══════════════════════════════════════════════════╝ */
-#screen-sensorium { padding: 0 !important; gap: 0 !important; overflow: hidden; }
+#screen-sensorium { padding: 0 !important; gap: 0 !important; overflow: hidden; height: 100%; }
 
 .sensorium-layout {
   display: grid;
   grid-template-columns: clamp(200px, 22vw, 320px) 1fr clamp(200px, 22vw, 320px);
   grid-template-rows: 1fr 220px;
   height: 100%;
+  min-height: 0;
   gap: 0;
 }
 
@@ -312,13 +316,15 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
 /* ╔══════════════════════════════════════════════════╗
    ║               OUTPUT SCREEN STYLES (PHASE 6)      ║
    ╚══════════════════════════════════════════════════╝ */
-#screen-output { padding: 0 !important; gap: 0 !important; overflow: hidden; }
+#screen-output { padding: 0 !important; gap: 0 !important; overflow: hidden; height: 100%; }
+#screen-sensorium { height: 100%; }
 
 .output-layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
   height: 100%;
+  min-height: 0;
   gap: 0;
 }
 
@@ -425,7 +431,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
 
 /* VoiceSynth panel */
 .voicesynth-panel { grid-column: 1; grid-row: 2; }
-#voicesynth-canvas { width: 100%; flex: 1; display: block; background: #000; }
+#voicesynth-canvas { width: 100%; flex: 1; min-height: 60px; display: block; background: #000; }
 .voicesynth-controls {
   padding: 10px 16px;
   border-top: 1px solid var(--border);
@@ -434,6 +440,34 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
   align-items: center;
   flex-shrink: 0;
 }
+/* VoiceSynth idle overlay */
+.vs-idle-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(12,11,16,0.82);
+  backdrop-filter: blur(4px);
+  gap: 10px;
+  z-index: 5;
+  pointer-events: all;
+  transition: opacity 0.35s ease;
+}
+.vs-idle-overlay.hidden { opacity: 0; pointer-events: none; }
+.vs-idle-pulse {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  border: 2px solid var(--accent);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px;
+  box-shadow: 0 0 20px var(--accent-glow);
+  animation: pulse 2s infinite cubic-bezier(0.4,0,0.6,1);
+  cursor: pointer;
+}
+.vs-idle-label { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); letter-spacing: 1px; }
 .osc-grid {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
@@ -562,11 +596,13 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
     <label class="nav-tab" for="route-output">7. OUTPUT ◉</label>
   </nav>
 
+  <div class="screen-wrapper">
+
   <!-- ═══════════════════════════════════════════════════════════════ -->
   <!-- SCREEN 1: ARCHITECTURE                                          -->
   <!-- ═══════════════════════════════════════════════════════════════ -->
   <div class="screen" id="screen-setup">
-    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap:24px;">
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap:24px; flex-shrink:0;">
 
       <div class="panel">
         <div class="panel-header">NETWORK TOPOLOGY (RWKV-v8 · ROSA PRIMARY)</div>
@@ -599,7 +635,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
             <option value="muon" selected>Muon (Quality / Desktop)</option>
           </select>
         </div>
-        <div style="margin-top:auto; padding-top:20px; border-top:1px solid var(--border);">
+        <div style="padding-top:20px; border-top:1px solid var(--border);">
           <div style="font-family:var(--font-mono); font-size:32px; color:var(--accent); font-weight:800; letter-spacing:-1px;" id="stat-params">0.00M</div>
           <div style="color:var(--text-muted); font-size:12px; margin-top:4px; font-weight:600; text-transform:uppercase;">Total Ternary Parameters</div>
           <div style="margin-top:16px; display:flex; gap:12px; flex-wrap:wrap;">
@@ -728,6 +764,15 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
             </div>
           </div>
         </div>
+        <div class="control-group" style="margin-bottom:20px;">
+          <label style="margin-bottom:6px;"><span>Muon AdamW Warmup</span></label>
+          <div style="display:flex; align-items:center; gap:10px;">
+            <input type="checkbox" id="muon-warmup-en" checked style="accent-color:var(--accent); width:16px; height:16px; cursor:pointer;">
+            <span style="color:var(--text-muted); font-size:12px;">first</span>
+            <input type="number" class="val-input" id="muon-warmup-steps" value="500" min="50" step="50" style="width:70px;">
+            <span style="color:var(--text-muted); font-size:12px;">steps</span>
+          </div>
+        </div>
         <div class="control-group">
           <label><span>LR Schedule</span></label>
           <select id="lr-schedule" onchange="updateScheduleUI(this.value)" style="width:100%; background:var(--bg-primary); border:1px solid var(--border); color:var(--text-main); font-family:var(--font-mono); font-size:13px; padding:10px; border-radius:8px; outline:none; margin-bottom:12px;">
@@ -807,7 +852,7 @@ Assistant: Let me think step-by-step.</textarea>
           <button class="btn primary" id="btn-grpo-exec" onclick="executeGRPOEpoch()">EXECUTE GRPO EPOCH</button>
         </div>
       </div>
-      <div class="panel" style="margin-top:auto;">
+      <div class="panel">
         <div class="panel-header">REINFORCEMENT METRICS</div>
         <div class="stat-grid">
           <div class="stat-item">Epochs <span id="ui-grpo-epoch">0</span></div>
@@ -829,7 +874,7 @@ Assistant: Let me think step-by-step.</textarea>
   <!-- ═══════════════════════════════════════════════════════════════ -->
   <div class="screen" id="screen-infer">
     <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:24px; flex:1; min-height:0;">
-      <div class="panel" style="display:flex; flex-direction:column;">
+      <div class="panel" style="display:flex; flex-direction:column; overflow-y:auto;">
         <div class="panel-header">DECODING SAMPLER</div>
         <div class="control-group">
           <label><span>Temperature</span> <input type="number" class="val-input" id="val-temp" min="0.01" max="2.0" step="0.01" value="0.80" onchange="document.getElementById('inf-temp').value=Math.round(this.value*100)"></label>
@@ -852,16 +897,16 @@ Assistant: Let me think step-by-step.</textarea>
           <label><span>Repetition Penalty</span> <input type="number" class="val-input" id="val-rep-penalty" min="1.0" max="2.0" step="0.01" value="1.0" onchange="document.getElementById('inf-rep-penalty').value=Math.round(this.value*100)"></label>
           <input type="range" id="inf-rep-penalty" min="100" max="200" value="100" oninput="document.getElementById('val-rep-penalty').value=(this.value/100).toFixed(2)">
         </div>
-        <div class="control-group" style="margin-top:auto;">
+        <div class="control-group">
           <label>Context Sequence</label>
-          <textarea id="inf-prompt" style="height:120px;" placeholder="Input context sequence..."></textarea>
+          <textarea id="inf-prompt" style="flex:1; min-height:80px; resize:vertical;" placeholder="Input context sequence..."></textarea>
         </div>
         <div class="btn-row">
           <button class="btn primary" id="btn-infer-run" onclick="startInference()">GENERATE</button>
           <button class="btn danger" id="btn-infer-stop" style="flex: 0.3;" onclick="stopInference()" disabled>HALT</button>
         </div>
       </div>
-      <div class="panel" style="display:flex; flex-direction:column;">
+      <div class="panel" style="display:flex; flex-direction:column; min-height:200px;">
         <div class="panel-header">RUNTIME OUTPUT</div>
         <div id="inf-output" class="terminal-output" style="font-size:15px; color:var(--text-main);"></div>
       </div>
@@ -1179,6 +1224,11 @@ Assistant: Let me think step-by-step.</textarea>
             <span style="font-size:10px; color:var(--text-muted);">GAIN: <span id="vs-gain">1.000</span></span>
           </div>
         </div>
+        <!-- Idle overlay: click to enable audio (browser autoplay policy) -->
+        <div class="vs-idle-overlay" id="vs-idle-overlay" onclick="_vsStartFromOverlay()">
+          <div class="vs-idle-pulse">♪</div>
+          <div class="vs-idle-label">CLICK TO ENABLE VOICESYNTH</div>
+        </div>
         <div class="osc-grid" id="osc-grid"></div>
         <canvas id="voicesynth-canvas" style="flex:1; background:#000;"></canvas>
         <div class="voicesynth-controls">
@@ -1208,6 +1258,8 @@ Assistant: Let me think step-by-step.</textarea>
 
     </div>
   </div>
+
+  </div><!-- /screen-wrapper -->
 
   <footer>
     <div class="footer-stat">V8 Context: <span class="sys-ok">Active</span></div>
@@ -1942,6 +1994,7 @@ class LanguageModel {
     // Cold-start mitigation — gives ROSA a structural seed at session begin.
     // Zero-initialized. Updated during fine-tuning. Serialized in .simpip.
     this.self_embed = new Float32Array(cfg.dim);
+    this.self_embedGrad = new Float32Array(cfg.dim);
     this._isFirstToken = true;
   }
 
@@ -1962,6 +2015,7 @@ class LanguageModel {
     for (let i = 0; i < this.cfg.dim; i++) x[i] = this.embedding[id * this.cfg.dim + i];
 
     // Self-embed + session_begin bookmark injection at position 0
+    const isFirstToken = this._isFirstToken;
     if (this._isFirstToken) {
       for (let i = 0; i < this.cfg.dim; i++) x[i] += this.self_embed[i];
       for (const block of this.blocks) {
@@ -1985,7 +2039,7 @@ class LanguageModel {
     const preHeadRes = this.ln_out.forward(x);
     const logits = this.head.forward(preHeadRes.out);
 
-    return { logits, state: nextState, caches: { lnIn: lnInRes.cache, lnOut: preHeadRes.cache, blocks: blockCaches, preHeadOut: preHeadRes.out, tokenId: id } };
+    return { logits, state: nextState, caches: { lnIn: lnInRes.cache, lnOut: preHeadRes.cache, blocks: blockCaches, preHeadOut: preHeadRes.out, tokenId: id, isFirstToken } };
   }
 
   backward(gradOut, caches, gradStatesIn = null) {
@@ -2005,15 +2059,21 @@ class LanguageModel {
       }
     }
 
+    gradIn = this.ln_in.backward(gradIn, caches.lnIn);
+    
     const embBase = caches.tokenId * this.cfg.dim;
     for (let i = 0; i < this.cfg.dim; i++) this.embGrad[embBase + i] += gradIn[i];
-    gradIn = this.ln_in.backward(gradIn, caches.lnIn);
+    
+    if (caches.isFirstToken) {
+      for (let i = 0; i < this.cfg.dim; i++) this.self_embedGrad[i] += gradIn[i];
+    }
+    
     return { gradIn, gradStatesOut };
   }
 
   embStep(lr) {
     for (let i = 0; i < this.embGrad.length; i++) this.embedding[i] -= lr * this.embGrad[i];
-    this.embGrad.fill(0);
+    for (let i = 0; i < this.self_embedGrad.length; i++) this.self_embed[i] -= lr * this.self_embedGrad[i];
   }
 
   getLinearLayers() {
@@ -2027,6 +2087,8 @@ class LanguageModel {
   }
 
   zeroGrad() {
+    this.embGrad.fill(0);
+    this.self_embedGrad.fill(0);
     this.ln_in.zeroGrad(); this.ln_out.zeroGrad();
     for (const b of this.blocks) { b.ln1.zeroGrad(); b.ln2.zeroGrad(); if (b.zeroMuGrad) b.zeroMuGrad(); }
     for (const l of this.getLinearLayers()) l.zeroGrad();
@@ -5038,11 +5100,15 @@ async function startTraining() {
   const lr = parseFloat(document.getElementById('cfg-lr').value) / 1000;
   const optType = document.getElementById('cfg-optimizer').value;
 
+  const warmupEn = document.getElementById('muon-warmup-en') ? document.getElementById('muon-warmup-en').checked : true;
+  const warmupSteps = document.getElementById('muon-warmup-steps') ? parseInt(document.getElementById('muon-warmup-steps').value) : 500;
+
   if (!App.trainer) {
-    const opt = optType === 'muon' ? new MuonOptimizer(lr) : new AdamOptimizer(lr);
+    // If Muon is selected, start with AdamW for the warmup steps if enabled
+    const opt = (optType === 'muon' && warmupEn && 0 < warmupSteps) ? new AdamOptimizer(lr) : (optType === 'muon' ? new MuonOptimizer(lr) : new AdamOptimizer(lr));
     App.trainer = new Trainer(App.model, opt);
   } else {
-    const newOpt = optType === 'muon' ? new MuonOptimizer(lr) : new AdamOptimizer(lr);
+    const newOpt = (optType === 'muon' && warmupEn && App.trainer.globalStep < warmupSteps) ? new AdamOptimizer(lr) : (optType === 'muon' ? new MuonOptimizer(lr) : new AdamOptimizer(lr));
     App.trainer.opt = newOpt;
     App.trainer.isPaused = false;
   }
@@ -5078,11 +5144,16 @@ async function startTraining() {
 
       if (microStep >= CONFIG.grad_accum_steps) {
         await App.trainer.opt.step(App.model);
-        App.model.embStep(lr * 0.1);
+        App.model.embStep((lr * 0.1) / CONFIG.grad_accum_steps);
         App.model.zeroGrad();
 
         App.trainer.globalStep++;
         const avgLoss = accumLoss / CONFIG.grad_accum_steps;
+
+        if (optType === 'muon' && warmupEn && App.trainer.globalStep === warmupSteps) {
+          sysLog('Warmup complete. Switching from AdamW to Muon optimizer for orthogonalization...', 'info');
+          App.trainer.opt = new MuonOptimizer(lr);
+        }
 
         const scheduledLR = computeScheduledLR(lr, App.trainer.globalStep);
         App.trainer.opt.lr = scheduledLR;
@@ -6642,8 +6713,45 @@ const VoiceSynth = {
   }
 };
 
-function startVoiceSynth() { VoiceSynth.start(); }
-function stopVoiceSynth()  { VoiceSynth.stop(); }
+function startVoiceSynth() {
+  VoiceSynth.start();
+  const ov = document.getElementById('vs-idle-overlay');
+  if (ov) ov.classList.add('hidden');
+}
+function stopVoiceSynth() {
+  VoiceSynth.stop();
+  const ov = document.getElementById('vs-idle-overlay');
+  if (ov) ov.classList.remove('hidden');
+}
+function _vsStartFromOverlay() {
+  // Called by clicking the idle overlay — satisfies browser autoplay gesture requirement
+  startVoiceSynth();
+}
+
+// Auto-start VoiceSynth when the user navigates to the OUTPUT tab for the first time
+;(function() {
+  const outputRadio = document.getElementById('route-output');
+  if (outputRadio) {
+    outputRadio.addEventListener('change', function onOutputTabFirst() {
+      if (outputRadio.checked && !VoiceSynth._running) {
+        // Don't auto-start directly — browsers block audio without gesture.
+        // Just make the overlay visible and pulsing so user knows to click.
+        const ov = document.getElementById('vs-idle-overlay');
+        if (ov) { ov.classList.remove('hidden'); }
+      }
+    });
+  }
+  // Also: if the user has already interacted with the page and lands on OUTPUT, try auto-start
+  document.querySelectorAll('.nav-tab[for="route-output"]').forEach(label => {
+    label.addEventListener('click', () => {
+      setTimeout(() => {
+        if (!VoiceSynth._running) {
+          try { startVoiceSynth(); } catch(e) {}
+        }
+      }, 200);
+    });
+  });
+})();
 
 /* ╔══════════════════════════════════════════════════════════════════╗
    ║  6.4 — RIFT OUTPUT CHANNEL                                        ║
@@ -6868,11 +6976,38 @@ const RIFTOutput = {
 };
 
 /* ── Phase 6 master update loop ─────────────────────────────────────── */
+let _vsIdleT = 0;
+function _drawVsIdle() {
+  const canvas = document.getElementById('voicesynth-canvas');
+  if (!canvas) return;
+  const w = canvas.width  = canvas.offsetWidth  || 400;
+  const h = canvas.height = canvas.offsetHeight || 100;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+  // Gentle breathing sine wave in accent color
+  _vsIdleT += 0.04;
+  const amp = h * 0.12 * (0.6 + 0.4 * Math.sin(_vsIdleT * 0.3));
+  ctx.strokeStyle = 'rgba(109,40,217,0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let x = 0; x <= w; x++) {
+    const y = h / 2 + amp * Math.sin((x / w) * Math.PI * 6 + _vsIdleT);
+    x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  // Dim label
+  ctx.fillStyle = 'rgba(109,40,217,0.3)';
+  ctx.font = '10px monospace';
+  ctx.fillText('IDLE — click ♪ to activate', 8, 14);
+}
+
 function phase6Update() {
   updateAllCoherenceBadges();
   VisualField.update();
   RIFTOutput.draw();
-  // VoiceSynth updates itself on its own interval
+  // VoiceSynth updates itself on its own interval when running; draw idle otherwise
+  if (!VoiceSynth._running) _drawVsIdle();
 }
 
 // Initialize RIFT Output orbit controls after DOM is ready

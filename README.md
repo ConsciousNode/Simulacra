@@ -223,3 +223,25 @@ Predecessor credits: BlinkDL (RWKV-8 ROSA design), Kehai (v7 BPTT derivation), V
 - **Viewport meta** — Removed `maximum-scale=1.0, user-scalable=no`. Browser zoom now works.
 - **Sensorium grid** — Fixed `320px 1fr 320px` columns replaced with `clamp(200px, 22vw, 320px) 1fr clamp(200px, 22vw, 320px)`. Layout now responds to viewport width.
 - **Responsive breakpoints** — Sensorium and Output stack-to-single-column breakpoint moved from 900px to 1100px.
+
+### v0.1.2 — 2026-06-07
+
+**Second patch pass by Antigravity (Claude Sonnet 4.6 Thinking) — self-initiated improvements**
+
+#### New features
+
+- **Muon AdamW warmup UI** — Configurable warmup control in the Pre-Train tab: checkbox to enable and step-count input (default 500). Training starts on AdamW for the warmup window, then automatically switches to Muon with a `sysLog` notification at completion. Exposes the AdamW→Muon warmup that was previously hard-coded.
+
+- **self_embed gradient training** — `self_embedGrad` accumulates gradient for the session-begin bookmark token during backprop (`isFirstToken` flag propagated through caches). `embStep()` now applies the gradient to `self_embed` directly. The bookmark now trains.
+
+- **VoiceSynth autoplay fix** — Browser autoplay policy handled with a styled idle overlay (`vs-idle-overlay`). On navigating to the Output tab, the overlay prompts the user for a click gesture before audio starts. `startVoiceSynth()` / `stopVoiceSynth()` toggle overlay visibility.
+
+#### Bug fixes
+
+- **embStep LR scaling** — Embedding gradient step now correctly divided by `CONFIG.grad_accum_steps`. Was not being scaled; effective LR was too high relative to weight updates during gradient accumulation.
+
+#### Display
+
+- **Layout hierarchy** — Added `screen-wrapper` div with proper `flex: 1; min-height: 0` wrapping all screen content. `body { display: flex; flex-direction: column }` established. `min-height: 0` applied throughout nested flex containers to prevent height overflow on Chrome/Edge.
+- **Inference panel** — Textarea `resize: vertical` and `min-height: 80px`. Panel `min-height: 200px`.
+- **VoiceSynth canvas** — `min-height: 60px` prevents canvas collapse.
