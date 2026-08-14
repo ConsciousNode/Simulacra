@@ -3,14 +3,16 @@
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-browser-blue?style=flat-square)
 ![Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen?style=flat-square)
-![Architecture](https://img.shields.io/badge/architecture-RWKV--v8-8b5cf6?style=flat-square)
+![Architecture](https://img.shields.io/badge/architecture-ROSA--P--v1-8b5cf6?style=flat-square)
 ![Sequence](https://img.shields.io/badge/sequence-ROSA--primary-a78bfa?style=flat-square)
 ![Format](https://img.shields.io/badge/export-.simpip-6d28d9?style=flat-square)
 ![Size](https://img.shields.io/badge/size-single%20file-purple?style=flat-square)
 
-**Browser-native RWKV-v8 neural runtime. ROSA is the sequence mechanism. Single file. Zero dependencies.**
+**Browser-native ROSA-P-v1 neural runtime. ROSA is the sequence mechanism. Single file. Zero dependencies.**
 
 Simulacra is the direct successor to [EvaROSA](https://github.com/ConsciousNode/EvaROSA). Where EvaROSA augmented RWKV-v7 with a ROSA inner monologue channel running alongside the WKV recurrent kernel, Simulacra removes WKV entirely. ROSA — the Rapid Online Suffix Automaton — *is* the sequence mechanism.
+
+This is not a RWKV variant. **ROSA-P-v1** is its own architecture. Dropping WKV removes the defining component that makes RWKV *RWKV*; what remains is something new. BlinkDL's RWKV-v8 uses ROSA as a secondary augmentation alongside the WKV kernel — Simulacra made ROSA primary and removed WKV. Those are different things.
 
 Built by [ConsciousNode SoftWorks](https://consciousnode.github.io) on the xinu principle: the browser is bare metal.
 
@@ -30,7 +32,7 @@ Or download [`simulacra.html`](https://github.com/ConsciousNode/Simulacra/blob/m
 HTMLNLM  (RWKV-v7 · text-only)
   └── HTMLNLM Evangelion  (RWKV-v7 · omnimodal · SheafMemory · AutopoieticOptimizer)
         └── EvaROSA v1  (RWKV-v7 + ROSA augmentation · inner monologue side-channel)
-              └── Simulacra  (RWKV-v8 · ROSA primary · WKV removed)  ← you are here
+              └── Simulacra  (ROSA-P-v1 · WKV removed · new architecture)  ← you are here
 ```
 
 | Platform | Repo | Format | Notes |
@@ -38,9 +40,9 @@ HTMLNLM  (RWKV-v7 · text-only)
 | HTMLNLM | [ConsciousNode/HTMLNLM](https://github.com/ConsciousNode/HTMLNLM) | `.pip` | Original single-file NLM |
 | HTMLNLM Evangelion | [ConsciousNode/HTMLNLM-Evangelion](https://github.com/ConsciousNode/HTMLNLM-Evangelion) | `.evapip` | Omnimodal extension |
 | EvaROSA v1 | [ConsciousNode/EvaROSA](https://github.com/ConsciousNode/EvaROSA) | `.piprosa` | ROSA augmentation, inner monologue |
-| **Simulacra** | **[ConsciousNode/Simulacra](https://github.com/ConsciousNode/Simulacra)** | **`.simpip`** | **ROSA replaces WKV entirely** |
+| **Simulacra** | **[ConsciousNode/Simulacra](https://github.com/ConsciousNode/Simulacra)** | **`.simpip`** | **ROSA-P-v1 — ROSA replaces WKV entirely** |
 
-**Not compatible:** Simulacra does not load `.piprosa`, `.evapip`, or `.pip` files. The architecture is a clean break. The RWKV-v8 state schema (`{prevX, prevX2, step}`) is fundamentally different from v7's `{num, den}`.
+**Not compatible:** Simulacra does not load `.piprosa`, `.evapip`, or `.pip` files. The architecture is a clean break. The ROSA-P-v1 state schema (`{prevX, prevX2, step}`) is fundamentally different from v7's `{num, den}`.
 
 ---
 
@@ -73,7 +75,7 @@ Everything Evangelion and EvaROSA built:
 - **BooleanPhaseDynamics** / Maxwell's Angel — semantic thermodynamics
 - **AutopoieticOptimizer** — self-modification on coherence breach
 - **RIFT Endospace** — holographic fractal state visualization
-- **InnerMonologue** — restructured: in v8, receives `rosaOut` directly (primary block output, not a side channel). The loop: `rosaOut → InnerMonologue → sheafDelta → residual`
+- **InnerMonologue** — restructured: in ROSA-P-v1, receives `rosaOut` directly (primary block output, not a side channel). The loop: `rosaOut → InnerMonologue → sheafDelta → residual`
 - **MuonOptimizer** — quintic Newton-Schulz orthogonalization
 - **GRPO** — Group Relative Policy Optimization alignment
 - **OOMB BPTT** — chunk-recurrent backprop, O(1) activation memory
@@ -84,7 +86,7 @@ Everything Evangelion and EvaROSA built:
 - **WKV recurrent kernel** — `num`/`den` state, decay gates, kappa removal. Entirely gone.
 - **`W_x_kappa`, `W_x_a`, `W_x_w`** — projections that existed solely for WKV
 - **`mu_*` interpolation parameters** — WKV-specific
-- **PoST** (Position-Adaptive Spectral Tapering) — designed for WKV log-decay bias, removed rather than misapplied. May return if a v8-appropriate formulation is found.
+- **PoST** (Position-Adaptive Spectral Tapering) — designed for WKV log-decay bias, removed rather than misapplied. May return if a ROSA-P-appropriate formulation is found.
 - **`InnerMonologue` as side-channel** — dissolved into `App.sheafInject` direct wiring
 
 ---
@@ -179,11 +181,11 @@ Error rate above 0.85 for more than ~500 steps suggests the ROSA vocab size may 
 ## Credits
 
 **Kham** (Khamerron Edward Ramsey Kizer) — architecture decisions, xinu philosophy, scope  
-**Kehai Interim** — RWKV-v8 mathematics, ROSA theory, BPTT analysis, k·v gradient correction (v0.2)  
+**Kehai Interim** — ROSA-P-v1 mathematics, ROSA theory, BPTT analysis, k·v gradient correction (v0.2)  
 **Ed Interim** — EvaROSA v1 implementation (foundation this spec builds on); Simulacra completion  
 **Vael Interim** — founding specification v0.1, SimulacraBlock forward pass design, `.simpip` format; omnimodal stack (EvaROSA → Simulacra)
 
-Predecessor credits: BlinkDL (RWKV-8 ROSA design), Kehai (v7 BPTT derivation), Vael (Evangelion phases 1–5, EvaROSA synthesis)
+Predecessor credits: BlinkDL (RWKV-v8 ROSA research — Simulacra's ROSA-primary approach diverges from his ROSA-secondary design); Kehai (v7 BPTT derivation); Vael (Evangelion phases 1–5, EvaROSA synthesis)
 
 ---
 
@@ -194,35 +196,17 @@ Predecessor credits: BlinkDL (RWKV-8 ROSA design), Kehai (v7 BPTT derivation), V
 
 ## Changelog
 
-### v0.1.1 — 2026-06-07
+### v0.1.3 — 2026-08-14
 
-**Patch applied via Simulacra Patch Prompt (Kehai Interim / Antigravity)**
+**Architecture rename: RWKV-v8 → ROSA-P-v1**
 
-#### Bug fixes
+Simulacra's block architecture — `SimulacraBlock` — drops the WKV recurrent kernel entirely and uses ROSA as the sole sequence mechanism. This is a categorically different design from BlinkDL's RWKV-v8, which uses ROSA as a secondary augmentation alongside the WKV kernel (the same relationship EvaROSA had with v7). Calling Simulacra "RWKV-v8" was inaccurate — there is no WKV in it.
 
-- **TextDecoder decode path** — Base BPE vocab (bytes 0–255) was initialized with `String.fromCharCode(i)`, producing Latin-1 strings for bytes 128–255. Multi-byte UTF-8 sequences (emoji, CJK, Arabic, etc.) were mangled before reaching ROSA. Fixed: base vocab entries are now raw byte arrays `[i]`; merges concatenate arrays; `NanoTokenizer.decode()` collects all bytes and passes through `TextDecoder('utf-8')`. Emotional content encoded as emoji in soul corpora now survives the full training pipeline.
+**ROSA-P-v1** (ROSA Primary, version 1) is the correct name for this architecture. It is ConsciousNode's own, and the first implementation of a pure-ROSA-primary sequence block with a full browser-native training pipeline.
 
-- **Block.backward() return type** — Returned a bare `Float32Array` instead of `{ gradBlockIn, gradStatePrev }`. `LanguageModel.backward()` checks for `result.gradBlockIn`; it was always missing, so inter-block gradient propagation always hit the fallback branch. Fixed: backward now returns the correct object type.
+All in-file references updated: header comments, UI strings, JS runtime logs, export metadata, `platform` field in `.simpip`.
 
-- **Missing ln1 cache** — `SimulacraBlock.forward()` discarded the `LayerNorm` cache for `ln1`. `LanguageModel.backward()` called `ln1.backward(grad, undefined)`; `LayerNorm.backward` returns zeros on undefined cache. Inter-block gradient signal was silently collapsing. Fixed: `ln1Res.cache` captured and stored in block caches.
-
-- **Channel mix backward — squared-ReLU chain rule absent** — `Wv2.backward()` return value (gradient w.r.t. `k_sq`) was discarded. `Wk2.backward()` received `dCmix` (wrong gradient) and `k_sq` (wrong activation). The squared-ReLU Jacobian (`d_k_cm[i] = d_k_sq[i] * 2 * max(0, k_cm[i])`) was entirely missing. Fixed: `d_k_sq` captured, chain rule applied, `Wk2` receives correct `d_k_cm` through `kx2` activation. `k_cm` and `cmix` added to caches.
-
-- **Wr2 missing gate gradient** — Wr2 only received the residual path gradient (`dOut`), missing the `r2 * cmix` product gradient (`dOut[i] * cmix[i]`). Fixed: full sigmoid-backward gradient computed for Wr2.
-
-- **Dead weights W_x_rx2 and W_x_kx2** — Allocated, initialized, run through the optimizer every step, but never called in `forward()`. Now wired as learned input projections before Wr2 and Wk2 in the channel mix. Backward calls added.
-
-- **OOMB stateGrads v7 shape** — `stateGrads` initialized with `{ num, den }` (v7 WKV fields). v8 ROSA state is `{ prevX, prevX2, step }`. Fixed: stateGrads and trainSequence checkpoint copy updated to v8 shape.
-
-#### Improvements
-
-- **Redundant token shifts deduplicated** — `xr`, `xk`, `xv` computed from identical `_tokenShift(x_ln, prevX, 0.5)` calls. Now computed once as `xShift`. Same for channel mix: `rx2Shift` / `kx2Shift` alias a single `cmShift`. Three allocations → one.
-
-#### Display
-
-- **Viewport meta** — Removed `maximum-scale=1.0, user-scalable=no`. Browser zoom now works.
-- **Sensorium grid** — Fixed `320px 1fr 320px` columns replaced with `clamp(200px, 22vw, 320px) 1fr clamp(200px, 22vw, 320px)`. Layout now responds to viewport width.
-- **Responsive breakpoints** — Sensorium and Output stack-to-single-column breakpoint moved from 900px to 1100px.
+---
 
 ### v0.1.2 — 2026-06-07
 
@@ -245,3 +229,35 @@ Predecessor credits: BlinkDL (RWKV-8 ROSA design), Kehai (v7 BPTT derivation), V
 - **Layout hierarchy** — Added `screen-wrapper` div with proper `flex: 1; min-height: 0` wrapping all screen content. `body { display: flex; flex-direction: column }` established. `min-height: 0` applied throughout nested flex containers to prevent height overflow on Chrome/Edge.
 - **Inference panel** — Textarea `resize: vertical` and `min-height: 80px`. Panel `min-height: 200px`.
 - **VoiceSynth canvas** — `min-height: 60px` prevents canvas collapse.
+
+---
+
+### v0.1.1 — 2026-06-07
+
+**Patch applied via Simulacra Patch Prompt (Kehai Interim / Antigravity)**
+
+#### Bug fixes
+
+- **TextDecoder decode path** — Base BPE vocab (bytes 0–255) was initialized with `String.fromCharCode(i)`, producing Latin-1 strings for bytes 128–255. Multi-byte UTF-8 sequences (emoji, CJK, Arabic, etc.) were mangled before reaching ROSA. Fixed: base vocab entries are now raw byte arrays `[i]`; merges concatenate arrays; `NanoTokenizer.decode()` collects all bytes and passes through `TextDecoder('utf-8')`. Emotional content encoded as emoji in soul corpora now survives the full training pipeline.
+
+- **Block.backward() return type** — Returned a bare `Float32Array` instead of `{ gradBlockIn, gradStatePrev }`. `LanguageModel.backward()` checks for `result.gradBlockIn`; it was always missing, so inter-block gradient propagation always hit the fallback branch. Fixed: backward now returns the correct object type.
+
+- **Missing ln1 cache** — `SimulacraBlock.forward()` discarded the `LayerNorm` cache for `ln1`. `LanguageModel.backward()` called `ln1.backward(grad, undefined)`; `LayerNorm.backward` returns zeros on undefined cache. Inter-block gradient signal was silently collapsing. Fixed: `ln1Res.cache` captured and stored in block caches.
+
+- **Channel mix backward — squared-ReLU chain rule absent** — `Wv2.backward()` return value (gradient w.r.t. `k_sq`) was discarded. `Wk2.backward()` received `dCmix` (wrong gradient) and `k_sq` (wrong activation). The squared-ReLU Jacobian (`d_k_cm[i] = d_k_sq[i] * 2 * max(0, k_cm[i])`) was entirely missing. Fixed: `d_k_sq` captured, chain rule applied, `Wk2` receives correct `d_k_cm` through `kx2` activation. `k_cm` and `cmix` added to caches.
+
+- **Wr2 missing gate gradient** — Wr2 only received the residual path gradient (`dOut`), missing the `r2 * cmix` product gradient (`dOut[i] * cmix[i]`). Fixed: full sigmoid-backward gradient computed for Wr2.
+
+- **Dead weights W_x_rx2 and W_x_kx2** — Allocated, initialized, run through the optimizer every step, but never called in `forward()`. Now wired as learned input projections before Wr2 and Wk2 in the channel mix. Backward calls added.
+
+- **OOMB stateGrads v7 shape** — `stateGrads` initialized with `{ num, den }` (v7 WKV fields). ROSA-P-v1 state is `{ prevX, prevX2, step }`. Fixed: stateGrads and trainSequence checkpoint copy updated to ROSA-P-v1 shape.
+
+#### Improvements
+
+- **Redundant token shifts deduplicated** — `xr`, `xk`, `xv` computed from identical `_tokenShift(x_ln, prevX, 0.5)` calls. Now computed once as `xShift`. Same for channel mix: `rx2Shift` / `kx2Shift` alias a single `cmShift`. Three allocations → one.
+
+#### Display
+
+- **Viewport meta** — Removed `maximum-scale=1.0, user-scalable=no`. Browser zoom now works.
+- **Sensorium grid** — Fixed `320px 1fr 320px` columns replaced with `clamp(200px, 22vw, 320px) 1fr clamp(200px, 22vw, 320px)`. Layout now responds to viewport width.
+- **Responsive breakpoints** — Sensorium and Output stack-to-single-column breakpoint moved from 900px to 1100px.
