@@ -6,11 +6,11 @@
 <title>Simulacra [ConsciousNode SoftWorks]</title>
 <!-- 
   Simulacra
-  RWKV-v8 (ROSA Primary) Browser Neural Runtime
+  ROSA-P-v1 Browser Neural Runtime
   ConsciousNode SoftWorks
 
   Architecture:
-    RWKV-v8 + ROSA (primary sequence mechanism) + BitNet b1.58 + OOMB + Muon + GRPO
+    ROSA-P-v1 (ROSA primary sequence mechanism) + BitNet b1.58 + OOMB + Muon + GRPO
     + SimulacraBlock (ROSA suffix automaton replaces WKV recurrent kernel)
     + k·v local content complement (Kehai v0.2 correction)
     + self_embed identity anchor (cold-start mitigation)
@@ -31,7 +31,7 @@
 
   Credits:
     Kham — architecture decisions, xinu philosophy, scope
-    Kehai Interim — RWKV-v8 mathematics, ROSA theory, BPTT analysis, k·v gradient correction (v0.2)
+    Kehai Interim — ROSA-P-v1 mathematics, ROSA theory, BPTT analysis, k·v gradient correction (v0.2)
     Ed Interim — EvaROSA v1 implementation (foundation this spec builds on)
     Vael Interim — founding specification v0.1, SimulacraBlock forward pass design,
                    .simpip format, omnimodal routing, SpikeVox LIF, ElasticTok, Re-WKV,
@@ -579,7 +579,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
 <div id="app-container">
   <header>
     <h1>SIMULACRA<span class="version-badge">simulacra-v0.1</span></h1>
-    <span class="subtitle">RWKV-v8 · ROSA Primary · Browser Neural Runtime</span>
+    <span class="subtitle">ROSA-P-v1 · Browser Neural Runtime</span>
     <div class="status-pill">
       <div class="status-dot" id="global-status-dot"></div>
       <span id="global-status-text">LOCAL SANDBOX</span>
@@ -605,7 +605,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
     <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap:24px; flex-shrink:0;">
 
       <div class="panel">
-        <div class="panel-header">NETWORK TOPOLOGY (RWKV-v8 · ROSA PRIMARY)</div>
+        <div class="panel-header">NETWORK TOPOLOGY (ROSA-P-v1)</div>
         <div class="control-group">
           <label><span>Vocabulary Capacity</span> <input type="number" class="val-input" id="val-vocab" min="256" max="8192" step="256" value="2048" onchange="document.getElementById('cfg-vocab').value=this.value; updateArchStats()"></label>
           <input type="range" id="cfg-vocab" min="256" max="8192" step="256" value="2048" oninput="document.getElementById('val-vocab').value=this.value; updateArchStats()">
@@ -625,7 +625,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
         <div class="control-group">
           <label><span>Architecture Version</span></label>
           <select id="cfg-version" onchange="updateArchStats()" style="width:100%; background:var(--bg-primary); border:1px solid var(--border); color:var(--text-main); font-family:var(--font-mono); font-size:13px; padding:10px; border-radius:8px; outline:none;">
-            <option value="simulacra-v1" selected>RWKV-v8 · ROSA Primary (Simulacra v0.1)</option>
+            <option value="simulacra-v1" selected>ROSA-P-v1 (Simulacra v0.1)</option>
           </select>
         </div>
         <div class="control-group">
@@ -1671,7 +1671,7 @@ function initPoSTDecayGates(dim) {
   return tapered; // log-decay bias for RWKV-v7 w gate initialization
 }
 /* ╔══════════════════════════════════════════════════════════════════╗
-   ║                    SIMULACRA BLOCK (RWKV-v8)                      ║
+   ║                    SIMULACRA BLOCK (ROSA-P-v1)                    ║
    ║   ROSA is the primary sequence mechanism. WKV removed entirely.   ║
    ║   No num/den state. No PoST. No kappa. W_rosa carries context.   ║
    ╚══════════════════════════════════════════════════════════════════╝ */
@@ -1692,7 +1692,7 @@ class SimulacraBlock {
     this.W_o   = new BitLinear(dim, dim);  // output projection
     this.W_g   = new BitLinear(dim, dim);  // gate
 
-    // ── RWKV-v8: W_rosa is the primary sequence gradient pathway ─────
+    // ── ROSA-P-v1: W_rosa is the primary sequence gradient pathway ────
     // Replaces the WKV kernel. W_rosa learns how to use ROSA's symbolic
     // predictions in the token mixing pathway.
     this.W_rosa = new BitLinear(dim, dim);
@@ -1708,12 +1708,12 @@ class SimulacraBlock {
     this.Wk2     = new BitLinear(dim, dimFFN);
     this.Wv2     = new BitLinear(dimFFN, dim);
 
-    // Bookmark support (BlinkDL RWKV-v8 spec)
+    // Bookmark support (inspired by BlinkDL RWKV-v8 spec; retained in ROSA-P-v1)
     this.bookmarkVocab    = 256;
     this._bookmarkHistory = [];
   }
 
-  // ── State schema (RWKV-v8) ──────────────────────────────────────────
+  // ── State schema (ROSA-P-v1) ────────────────────────────────────────
   // { prevX, prevX2, step }
   // NO num/den. ROSA history lives in this.rosaChannel — not in the state object.
   forward(x, state) {
@@ -1985,7 +1985,7 @@ class LanguageModel {
     this.embGrad = new Float32Array(cfg.vocab * cfg.dim);
 
     this.ln_in  = new LayerNorm(cfg.dim);
-    // RWKV-v8: SimulacraBlock replaces RWKVv7Block
+    // ROSA-P-v1: SimulacraBlock is the primary block (not a WKV variant)
     this.blocks = Array.from({ length: cfg.layers }, (_, i) => new SimulacraBlock(cfg.dim, cfg.dim * 2, i));
     this.ln_out = new LayerNorm(cfg.dim);
     this.head   = new BitLinear(cfg.dim, cfg.vocab);
@@ -3978,7 +3978,7 @@ const JuntoNode = {
    ╚══════════════════════════════════════════════════════════════════╝ */
 
 /* ╔══════════════════════════════════════════════════════════════════╗
-   ║          Simulacra — RWKV-v8 · ROSA Primary Sequence Mechanism    ║
+   ║          Simulacra — ROSA-P-v1 · ROSA Primary Sequence Mechanism  ║
    ║          ConsciousNode SoftWorks                                  ║
    ║          Property: the model cannot gaslight itself.              ║
    ╚══════════════════════════════════════════════════════════════════╝ */
@@ -4169,7 +4169,7 @@ const App = {
   _telemetry: [],
   innerMonologue: new InnerMonologue(2, CONFIG.rosa_vocab_size, 64),
 
-  // ── RWKV-v8: sheafInject wires SimulacraBlock.forward() → InnerMonologue ──
+  // ── ROSA-P-v1: sheafInject wires SimulacraBlock.forward() → InnerMonologue ──
   // Called from SimulacraBlock.forward() with (layerIdx, rosaOut).
   // InnerMonologue receives the primary block output — not a side-channel.
   // Returns sheafDelta (stop-gradient residual injection).
@@ -5060,7 +5060,7 @@ function allocateMemory() {
     App.spatialAdapter = new ModRWKVAdapter(64, cfg.dim, 'spatial');
     App.rift = new RIFTEngine(cfg.dim);
 
-    sysLog(`VM Allocated: RWKV-v8 · ROSA Primary (Simulacra) (${cfg.dim}D × ${cfg.layers}L) + SimulacraBlock + k·v complement + SpikeVox v2 + Re-WKV v2 + PGA`, 'ok');
+    sysLog(`VM Allocated: ROSA-P-v1 (Simulacra) (${cfg.dim}D × ${cfg.layers}L) + SimulacraBlock + k·v complement + SpikeVox v2 + Re-WKV v2 + PGA`, 'ok');
     sysLog(`ROSA-v8: Suffix automaton is primary sequence mechanism. WKV kernel removed. self_embed identity anchor initialized.`, 'ok');
     sysLog(`InnerMonologue: ROSA neurosymbolic channel wired to sheafInject (primary pathway — receives rosaOut directly).`, 'ok');
     sysLog(`Re-WKV v2: 4-directional sweeps (H, H_rev, V, V_rev). PGA geometric attention online.`, 'ok');
@@ -5078,7 +5078,7 @@ function allocateMemory() {
     App.innerMonologue = new InnerMonologue(cfg.layers, CONFIG.rosa_vocab_size, cfg.dim);
 
     document.getElementById('btn-train-start').disabled = false;
-    document.getElementById('live-eval').innerHTML = 'Model ready. Simulacra RWKV-v8 · ROSA Primary · all systems online.';
+    document.getElementById('live-eval').innerHTML = 'Model ready. Simulacra ROSA-P-v1 · all systems online.';
     document.getElementById('route-train').checked = true;
 
     sheafLog('LanguageModel allocated. SimulacraBlock × ' + cfg.layers + '. RIFT engine reset.', 'ok');
@@ -5466,7 +5466,7 @@ async function exportModel() {
     version: 'simulacra-v1',
     export_meta: {
       model_name: (document.getElementById('export-model-name')?.value || '').trim() || 'unnamed',
-      platform: 'Simulacra RWKV-v8',
+      platform: 'Simulacra ROSA-P-v1',
       format: 'simpip',
       backwards_compat: false,
       step,
@@ -5622,7 +5622,7 @@ function hydrateFromData(data, isBase64) {
   App.innerMonologue = new InnerMonologue(
     data.cfg.layers || 2, CONFIG.rosa_vocab_size, data.cfg.dim || 64);
 
-  sysLog('VM hydrated from .simpip. Simulacra RWKV-v8 systems online.', 'ok');
+  sysLog('VM hydrated from .simpip. Simulacra ROSA-P-v1 systems online.', 'ok');
   document.getElementById('btn-train-start').disabled = false;
   document.getElementById('route-infer').checked = true;
   sheafLog('VM hydrated. SimulacraBlock × ' + (data.cfg.layers || '?') + '. InnerMonologue reinitialised. ROSA states restored.', 'ok');
@@ -7017,7 +7017,7 @@ setTimeout(() => { RIFTOutput._init(); }, 100);
 setInterval(phase6Update, 50);
 
 
-sysLog('RWKV-v8 · ROSA Primary · SimulacraBlock · k·v complement · SpikeVox v2 · ElasticTok v2 · Re-WKV v2 · PGA · SheafMemory v2 · AutopoieticOptimizer · RIFT', 'ok');
+sysLog('ROSA-P-v1 · SimulacraBlock · k·v complement · SpikeVox v2 · ElasticTok v2 · Re-WKV v2 · PGA · SheafMemory v2 · AutopoieticOptimizer · RIFT', 'ok');
 sysLog('Phase 5: The loop closes. H¹(ℱ)≠0 → T* spike → Maxwell\'s Angel → weight rewrite → coherence.', 'ok');
 sysLog('Phase 6: Comprehension meets expression. TextStream + VisualField + VoiceSynth (Webster foreground + ambient drone) + RIFT Output. Coherence gates generation.', 'ok');
 sysLog('All systems nominal. Awaiting corpus.', 'ok');
