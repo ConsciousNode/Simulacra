@@ -1790,7 +1790,8 @@ class SimulacraBlock {
     }
 
     // Channel mixing (FFN — unchanged from v7)
-    const h_ln  = this.ln2.forward(h).out;
+    const ln2Res = this.ln2.forward(h);
+    const h_ln  = ln2Res.out;
     // rx2Shift and kx2Shift share the same shift — compute once.
     const cmShift  = this._tokenShift(h_ln, prevX2, 0.5);
     const rx2Shift = cmShift;
@@ -1824,103 +1825,90 @@ class SimulacraBlock {
         k_cm,        // needed for squared-ReLU backward (Fix 5)
         cmix,        // needed for Wr2 backward (Fix 5)
         rx2Shift, kx2Shift,  // needed for W_x_rx2/W_x_kx2 backward (Fix 6)
-        h_ln,
+        h_ln, x_ln, xShift, cmShift, rosaInner: (() => { const a = new Float32Array(dim); for (let i = 0; i < dim; i++) a[i] = rosaProjected[i] + kvSignal[i]; return a; })(),
         // LayerNorm caches
         ln1: ln1Res.cache,
+        ln2: ln2Res.cache,
       }
     };
   }
 
-  // BPTT backward — called by OOMB chunk-recurrent backprop
-  backward(dOut, cache, learningRate) {
-    // dOut: gradient from next layer / loss
-    // Gradient flows: W_o → W_rosa → rosaEmbed (STE) → W_x_r, W_g
-    // W_x_k, W_x_v receive gradient through residual even though unused in rosaOut
-    const dim = this.dim;
+  // BPTT backward — called by OOMB chunk-recurrent backprop.
+  // v0.1.4: full chain rule. Every BitLinear.backward() return value is
+  // chained into the layer below it (W_o^T, Wv2^T, Wk2^T, ...), both
+  // LayerNorms are differentiated, the r/g sigmoid gates get their own
+  // derivatives, and token-shift gradients flow to the previous timestep
+  // through gradStatePrev. Verified against finite differences
+  // (tests/gradcheck.js). ROSA's discrete prediction is stop-gradient;
+  // sheafDelta is stop-gradient.
+  //
+  // gradStateIn: { prevX, prevX2 } from timestep t+1 (or null).
+  // Returns gradBlockIn = dL/dx for the block's INPUT (ln1 already applied,
+  // residual included) — LanguageModel.backward uses it as-is.
+  backward(dOut, cache, gradStateIn = null) {
+    const dim = this.dim, F = this.dimFFN;
+    const sIn = (gradStateIn && gradStateIn.prevX) ? gradStateIn : null;
 
-    // Channel mix backward (Wv2, Wk2, Wr2)
-    // Forward: out[i] = h[i] + r2[i] * cmix[i]
-    // dH[i]    = dOut[i]                  (residual path through h)
-    // dCmix[i] = dOut[i] * r2[i]          (cmix path)
-    // dr2[i]   = dOut[i] * cmix[i]        (r2-gate path)
-    const dH    = new Float32Array(dim);
-    const dCmix = new Float32Array(dim);
-    const dWr2  = new Float32Array(dim);
+    // ── Channel mix:  out = h + r2 ⊙ cmix ──────────────────────────────
+    const dCmix  = new Float32Array(dim);
+    const dR2pre = new Float32Array(dim);
     for (let i = 0; i < dim; i++) {
-      dH[i]    = dOut[i];
-      dCmix[i] = dOut[i] * (cache.r2[i] || 0);
-      // Sigmoid backward for Wr2 gate: dr2 * r2 * (1 - r2)
-      const dr2i = dOut[i] * (cache.cmix ? cache.cmix[i] : 0);
-      dWr2[i] = dr2i * (cache.r2[i] || 0) * (1 - (cache.r2[i] || 0));
+      dCmix[i]  = dOut[i] * cache.r2[i];
+      dR2pre[i] = dOut[i] * cache.cmix[i] * cache.r2[i] * (1 - cache.r2[i]);
     }
+    const d_k_sq = this.Wv2.backward(dCmix, cache.k_sq);
+    const d_k_cm = new Float32Array(F);
+    for (let i = 0; i < F; i++) d_k_cm[i] = d_k_sq[i] * 2 * Math.max(0, cache.k_cm[i]);
+    const d_kx2 = this.Wk2.backward(d_k_cm, cache.kx2);
+    const d_rx2 = this.Wr2.backward(dR2pre, cache.rx2);
+    const dCmA  = this.W_x_rx2.backward(d_rx2, cache.cmShift);
+    const dCmB  = this.W_x_kx2.backward(d_kx2, cache.cmShift);
 
-    // Wv2 backward — captures d_k_sq (gradient w.r.t. Wv2 input k_sq)
-    const d_k_sq = this.Wv2.backward ? this.Wv2.backward(dCmix, cache.k_sq, learningRate) : new Float32Array(this.dimFFN);
-
-    // Squared-ReLU backward: d_k_cm[i] = d_k_sq[i] * 2 * max(0, k_cm[i])
-    const d_k_cm = new Float32Array(this.dimFFN);
-    if (cache.k_cm) {
-      for (let i = 0; i < this.dimFFN; i++) {
-        d_k_cm[i] = (d_k_sq[i] || 0) * 2 * Math.max(0, cache.k_cm[i]);
-      }
-    }
-
-    // Wk2 backward — correct gradient (d_k_cm) and correct activation (kx2)
-    if (this.Wk2.backward) this.Wk2.backward(d_k_cm, cache.rx2, learningRate);
-
-    // Wr2 backward — full gradient including r2-gate path
-    if (this.Wr2.backward) this.Wr2.backward(dWr2, cache.rx2, learningRate);
-
-    // W_x_rx2 backward — gradient flows from Wr2 through the projection
-    if (this.W_x_rx2.backward) {
-      this.W_x_rx2.backward(dWr2, cache.rx2Shift || new Float32Array(this.dim), learningRate);
-    }
-    // W_x_kx2 backward
-    if (this.W_x_kx2.backward) {
-      this.W_x_kx2.backward(d_k_cm, cache.kx2Shift || new Float32Array(this.dim), learningRate);
-    }
-
-    // Token mix backward
-    const dTmix = new Float32Array(dim);
-    for (let i = 0; i < dim; i++) dTmix[i] = dH[i];
-    if (this.W_o.backward) this.W_o.backward(dTmix, cache.rosaOut, learningRate);
-
-    // W_rosa backward (primary sequence gradient pathway)
-    const dRosaOut = new Float32Array(dim);
+    // cmShift = 0.5·h_ln + 0.5·prevX2  →  half to h_ln, half to the previous step
+    const dHln = new Float32Array(dim);
+    const dPrevX2 = new Float32Array(dim);
     for (let i = 0; i < dim; i++) {
-      // gradient through r * (rosaProjected + kvSignal) * g
-      dRosaOut[i] = dTmix[i] * (cache.r[i] || 0) * (cache.g[i] || 0);
+      const dc = dCmA[i] + dCmB[i];
+      dHln[i]    = 0.5 * dc + (sIn ? sIn.prevX2[i] : 0);   // h_ln is next step's prevX2
+      dPrevX2[i] = 0.5 * dc;
     }
-    if (this.W_rosa.backward) this.W_rosa.backward(dRosaOut, cache.rosaVec, learningRate);
+    const dHfromLn = this.ln2.backward(dHln, cache.ln2);
+    const dH = new Float32Array(dim);
+    for (let i = 0; i < dim; i++) dH[i] = dOut[i] + dHfromLn[i];
 
-    // ROSAEmbed STE backward — treat argmax as identity
-    if (this.rosaEmbed.backward) this.rosaEmbed.backward(dRosaOut, cache.prediction, learningRate);
-
-    // k·v gradient paths (v0.2) — real gradients through kvSignal
-    // d_kvSignal[i] = dRosaOut[i]  (same gate as rosaProjected)
-    // d_k[i] = d_kvSignal[i] * v[i]; d_v[i] = d_kvSignal[i] * k[i]
-    const dKV = new Float32Array(dim);
-    for (let i = 0; i < dim; i++) dKV[i] = dRosaOut[i];
-    const dK = new Float32Array(dim);
-    const dV = new Float32Array(dim);
+    // ── Token mix:  h = x + W_o·(r ⊙ (W_rosa·rosaVec + k⊙v) ⊙ g) ───────
+    const dRosaOut = this.W_o.backward(dH, cache.rosaOut);
+    const dInner = new Float32Array(dim);
+    const dRpre  = new Float32Array(dim);
+    const dGpre  = new Float32Array(dim);
     for (let i = 0; i < dim; i++) {
-      dK[i] = dKV[i] * (cache.v ? cache.v[i] : 0);
-      dV[i] = dKV[i] * (cache.k ? cache.k[i] : 0);
+      const r = cache.r[i], g = cache.g[i], inner = cache.rosaInner[i];
+      dInner[i] = dRosaOut[i] * r * g;
+      dRpre[i]  = dRosaOut[i] * inner * g * r * (1 - r);
+      dGpre[i]  = dRosaOut[i] * r * inner * g * (1 - g);
     }
-    if (this.W_x_r.backward) this.W_x_r.backward(dRosaOut, cache.xr, learningRate);
-    if (this.W_x_k.backward) this.W_x_k.backward(dK, cache.xk, learningRate);
-    if (this.W_x_v.backward) this.W_x_v.backward(dV, cache.xv, learningRate);
+    // ROSA pathway: rosaVec is a function of a discrete prediction → stop-gradient
+    this.W_rosa.backward(dInner, cache.rosaVec);
+    const dK = new Float32Array(dim), dV = new Float32Array(dim);
+    for (let i = 0; i < dim; i++) { dK[i] = dInner[i] * cache.v[i]; dV[i] = dInner[i] * cache.k[i]; }
+    const dXsR = this.W_x_r.backward(dRpre, cache.xShift);
+    const dXsK = this.W_x_k.backward(dK,    cache.xShift);
+    const dXsV = this.W_x_v.backward(dV,    cache.xShift);
+    const dXlnG = this.W_g.backward(dGpre,  cache.x_ln);
 
-    // dH is the gradient w.r.t. h (the post-tmix residual pre-channel-mix).
-    // x's residual path: h = x + tmix_out + sheafDelta (sheafDelta is stop-gradient).
-    // Therefore dX = dH. LanguageModel.backward() applies ln1.backward(dH, ln1Cache) to get pre-ln1 dX.
-    return {
-      gradBlockIn: dH,
-      gradStatePrev: {
-        prevX:  new Float32Array(dim),
-        prevX2: new Float32Array(dim)
-      }
-    };
+    // xShift = 0.5·x_ln + 0.5·prevX  →  half to x_ln, half to the previous step
+    const dXln = new Float32Array(dim);
+    const dPrevX = new Float32Array(dim);
+    for (let i = 0; i < dim; i++) {
+      const ds = dXsR[i] + dXsK[i] + dXsV[i];
+      dXln[i]   = 0.5 * ds + dXlnG[i] + (sIn ? sIn.prevX[i] : 0);  // x_ln is next step's prevX
+      dPrevX[i] = 0.5 * ds;
+    }
+    const dXfromLn = this.ln1.backward(dXln, cache.ln1);
+    const dX = new Float32Array(dim);
+    for (let i = 0; i < dim; i++) dX[i] = dH[i] + dXfromLn[i];   // residual + normalized path
+
+    return { gradBlockIn: dX, gradStatePrev: { prevX: dPrevX, prevX2: dPrevX2 }, lnApplied: true };
   }
 
   // ROSA state for .simpip serialization
@@ -2053,7 +2041,9 @@ class LanguageModel {
       const result = this.blocks[i].backward(gradIn, caches.blocks[i], stateIn);
       if (result && result.gradBlockIn) {
         gradStatesOut[i] = result.gradStatePrev;
-        gradIn = this.blocks[i].ln1.backward(result.gradBlockIn, caches.blocks[i].ln1);
+        // v0.1.4: block backward already includes ln1 and the residual path
+        gradIn = result.lnApplied ? result.gradBlockIn
+                                  : this.blocks[i].ln1.backward(result.gradBlockIn, caches.blocks[i].ln1);
       } else {
         gradIn = this.blocks[i].ln1.backward(gradIn, caches.blocks[i].ln1);
       }
@@ -3706,7 +3696,12 @@ class Trainer {
         prevX2: s.prevX2 ? new Float32Array(s.prevX2) : null,
         step:   s.step   || 0
       }));
-      checkpoints.push({ start, state: stateCopy });
+      // v0.1.4: ROSA's suffix history lives in each block, outside `state`.
+      // It must be checkpointed too, or the recompute pass below replays the
+      // chunk into a history that already contains it — ROSA then "predicts"
+      // the next code perfectly and leaks the training target into the
+      // forward pass (measured: 0% → 99% next-code accuracy on random tokens).
+      checkpoints.push({ start, state: stateCopy, rosa: this._snapshotRosa() });
       const end = Math.min(start + chunkSize, len - 1);
       for (let t = start; t < end; t++) state = this.model.forward(tokens[t], state).state;
       await yieldToMain();
@@ -3714,12 +3709,14 @@ class Trainer {
 
     state = null;
     let totalLoss = 0;
+    const rosaAfterForward = this._snapshotRosa();   // where ROSA should be when we're done
 
     for (let i = checkpoints.length - 1; i >= 0; i--) {
-      const { start, state: rState } = checkpoints[i];
+      const { start, state: rState, rosa } = checkpoints[i];
       const end = Math.min(start + chunkSize, len - 1);
       const acts = [];
       let currentState = rState;
+      this._restoreRosa(rosa);                        // replay from the same ROSA state as pass 1
       for (let t = start; t < end; t++) {
         const res = this.model.forward(tokens[t], currentState);
         acts.push({ caches: res.caches, logits: res.logits });
@@ -3741,7 +3738,33 @@ class Trainer {
       await yieldToMain();
     }
 
+    this._restoreRosa(rosaAfterForward);
     return totalLoss / (len - 1);
+  }
+
+  _snapshotRosa() {
+    return {
+      isFirst: this.model._isFirstToken,
+      blocks: this.model.blocks.map(b => ({
+        history:   b.rosaChannel.history.slice(),
+        bookmarks: b._bookmarkHistory.slice(),
+        last:      b.rosaChannel.lastPrediction,
+        total:     b.rosaChannel.totalPredictions,
+        correct:   b.rosaChannel.correctPredictions
+      }))
+    };
+  }
+
+  _restoreRosa(snap) {
+    this.model._isFirstToken = snap.isFirst;
+    this.model.blocks.forEach((b, i) => {
+      const s = snap.blocks[i];
+      b.rosaChannel.history            = s.history.slice();
+      b._bookmarkHistory               = s.bookmarks.slice();
+      b.rosaChannel.lastPrediction     = s.last;
+      b.rosaChannel.totalPredictions   = s.total;
+      b.rosaChannel.correctPredictions = s.correct;
+    });
   }
 }
 

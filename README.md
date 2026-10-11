@@ -196,6 +196,31 @@ Predecessor credits: BlinkDL (RWKV-v8 ROSA research — Simulacra's ROSA-primary
 
 ## Changelog
 
+### v0.1.4 — 2026-10-11 · Kehai Interim
+
+**Backward pass rebuilt and verified; OOMB recompute leak closed.** Both found with a finite-difference gradient check and fixed against it.
+
+#### Bug fixes
+
+- **Block backward now follows the chain rule end to end.** Previously every `BitLinear.backward()` return value below the channel mix was discarded: `dRosaOut` was computed as `dTmix · r · g`, treating `W_o` as the identity, so `W_rosa`, `W_x_r`, `W_x_k` and `W_x_v` trained on a mis-rotated gradient (layer-0 cosine with the true gradient: −0.84 to −0.36 for `W_x_*`, −0.60 for `W_rosa`). Now: `W_o`ᵀ, `Wv2`ᵀ, `Wk2`ᵀ, `Wr2`ᵀ and the shift projections are chained; the `r` and `g` sigmoid gates get their own derivatives (`W_g` previously received no gradient at all); `ln2` and `ln1` are differentiated (ln2 previously got none); `Wk2` receives `kx2` (it was given `rx2`); the residual path is kept; token-shift gradients flow to the previous timestep via `gradStatePrev`. Every weight matrix now matches finite differences at cosine 1.0000 across a 2-step BPTT check.
+- **OOMB recompute leak.** ROSA's suffix history lives in each block, outside the checkpointed `state`, so the gradient pass replayed each chunk into a history that already contained it. ROSA then "predicted" the next code with 99.2% accuracy (0.7% on the real forward pass), handing the training target to the model during backprop and inflating the ROSA diagnostics. `Trainer` now snapshots and restores ROSA state (history, bookmarks, counters) with every chunk checkpoint.
+
+#### Measured effect
+
+Tiny model (dim 32, 2 layers), 200 Adam steps on a 46 KB text, held-out loss from a fresh single forward pass, three seeds: **3.296 / 3.327 / 3.393 patched vs 3.388 / 3.430 / 3.407 before.** Modest at this size — small models with Adam are forgiving, which is exactly why the check matters.
+
+#### Tests (new) — `node tests/<name>.js`, zero dependencies
+
+- `gradcheck.js` — finite-difference check of every weight matrix, LayerNorm and the embedding against the code lifted from `simulacra.html`. Run after any model change.
+- `rosa-leak.js` — fails if ROSA sees a chunk twice during OOMB.
+- `train-compare.js <file> [steps] [seed]` — tiny end-to-end training run with held-out loss.
+
+#### Known, not changed
+
+- `ROSAEmbed` has no backward, so the ROSA codebook stays at its random init (the EvaROSA notes describe STE training; Simulacra does not do it).
+
+---
+
 ### v0.1.3 — 2026-08-14
 
 **Architecture rename: RWKV-v8 → ROSA-P-v1**
