@@ -196,6 +196,15 @@ Predecessor credits: BlinkDL (RWKV-v8 ROSA research — Simulacra's ROSA-primary
 
 ## Changelog
 
+- **Senses, learned (2026-10-11 · Kehai Interim, ported from Evangelion Phase 7):** images and sounds become K=4 prefix vectors in embedding space that the model reads *before* text. Each sense also adds a context vector to every token's input while it is present, so what the model perceives stays in view instead of having to be remembered.
+
+- **Train on a paired corpus:** drop `photo.jpg` + `photo.txt`, `clip.wav` + `clip.txt` (matched by name) into the SENSES panel.
+- **Watch the *sense gap* meter:** caption loss with a wrong sense minus with the right one; above 0 means it is looking/listening.
+- **GENERATE from a sense:** a file, the live camera or the mic. With no prompt, it captions what it perceives.
+- **Mood steers temperature:** the sensorium's T* adjusts sampling temperature.
+- **Removed:** the old untrained state-nudge, which was handed App instead of the model and never ran.
+- **Tests:** `node tests/senses.js` (exact gradients through adapter + model) and `node tests/senses-learn.js` (does it learn to look and listen, on fresh renders it never saw).
+  **Simulacra sees best in the family.** On 8 never-seen test images it captioned all 8 exactly, left/right and green/yellow included (*"a green ball on the right."*). It picks the right caption 100% of the time (Evangelion: 6/8, 75%). On new sounds it captioned 4/4 exactly and reached 100% right picks by step 200. The ROSA-primary sequence mechanism seems to carry the sense through the caption better than WKV does.
 - **Ternary backward fixed (2026-10-11 · Kehai Interim):** BitLinear passed back Wᵀg using the float master weights, while the forward multiplies by the ternary γ·Q(W). They differ by the whole quantization error, so every layer sent back the gradient of a network that wasn't the one running. It came in with the Tier 0 fused backward. The input gradient is now γ·Q(W)ᵀg, and the weight gradient stays straight-through. **Measured in Evangelion** (same backbone), memorizing 8 repeating sentences at the default LR: 2.66 nats/byte before (stuck at unigram), **0.33 after** (float-weight reference: 0.88). New check: `TERNARY=1 node tests/gradcheck.js` runs the real ternary forward and requires everything upstream to be exact.
 - Speed, Tier 0 (2026-10-11 · Kehai Interim): fused cache-friendly BitLinear backward; Muon rebuilt (Newton–Schulz on the smaller side with cache-friendly loops, same update to 1e-6, ~2x faster; output head on AdamW per the original Muon recipe); **AdamW is now the default**, because on CPU Muon costs O(dim³) per matrix per step. Measured on HTMLNLM, a default training step went from ~104 s to ~11 s on one CPU thread. Gradient check still exact.
 

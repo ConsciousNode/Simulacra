@@ -680,6 +680,21 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
           <button class="btn primary" id="btn-alloc" onclick="allocateMemory()" disabled>ALLOCATE VM</button>
         </div>
       </div>
+
+      <div class="panel">
+        <div class="panel-header">SENSES — PAIRED CORPUS (LEARNED)</div>
+        <div class="dropzone" id="sense-dropzone" onclick="document.getElementById('sense-upload').click()" ondragover="event.preventDefault(); this.classList.add('dragover');" ondragleave="this.classList.remove('dragover');" ondrop="event.preventDefault(); this.classList.remove('dragover'); loadSensePairs(event.dataTransfer.files);">
+          <span style="font-size:14px; font-weight:700; color:var(--text-main);">Drop paired files here or click</span><br>
+          <span style="font-size:12px; opacity:0.6; margin-top:8px; display:inline-block;">photo.jpg + photo.txt · clip.wav + clip.txt — matched by name. Images and sounds become what the model sees and hears before reading the caption.</span>
+        </div>
+        <input type="file" id="sense-upload" multiple accept="image/*,audio/*,.txt,.md" style="display:none" onchange="loadSensePairs(this.files)">
+        <div id="sense-status" style="font-size:12px; opacity:0.8; margin-top:10px;">No pairs loaded. Load pairs BEFORE compiling BPE so captions join the vocabulary.</div>
+        <div class="control-group" style="margin-top:12px;">
+          <label><span>Sense-pair share of training steps</span> <input type="number" class="val-input" id="val-sense-mix" min="0" max="1" step="0.05" value="0.50" onchange="document.getElementById('sense-mix').value=Math.round(this.value*100)"></label>
+          <input type="range" id="sense-mix" min="0" max="100" value="50" oninput="document.getElementById('val-sense-mix').value=(this.value/100).toFixed(2)">
+        </div>
+        <div style="font-size:12px; margin-top:6px;">Sense gap: <b id="ui-sense-gap">–</b> <span style="opacity:0.6">(caption loss with a wrong sense − with the right one; above 0 means it is looking/listening)</span></div>
+      </div>
     </div>
 
     <div class="panel" style="margin-top: 24px; flex: 1; min-height: 250px;">
@@ -896,6 +911,20 @@ Assistant: Let me think step-by-step.</textarea>
         <div class="control-group">
           <label><span>Repetition Penalty</span> <input type="number" class="val-input" id="val-rep-penalty" min="1.0" max="2.0" step="0.01" value="1.0" onchange="document.getElementById('inf-rep-penalty').value=Math.round(this.value*100)"></label>
           <input type="range" id="inf-rep-penalty" min="100" max="200" value="100" oninput="document.getElementById('val-rep-penalty').value=(this.value/100).toFixed(2)">
+        </div>
+        <div class="control-group">
+          <label><span>Sense prefix</span></label>
+          <select id="inf-sense" class="val-input" style="width:100%;" onchange="document.getElementById('inf-sense-file').style.display = this.value === 'file' ? 'block' : 'none'">
+            <option value="none">none (text only)</option>
+            <option value="file">an image or sound file…</option>
+            <option value="camera">live camera frame</option>
+            <option value="mic">live microphone (last ~2 s)</option>
+          </select>
+          <input type="file" id="inf-sense-file" accept="image/*,audio/*" style="display:none; margin-top:6px;" onchange="setInferenceSenseFile(this.files[0])">
+          <small id="inf-sense-status" style="opacity:0.6;">The model reads the sense first, then your prompt, like a caption, and the sense stays in view while it writes. Live camera/mic keep updating as it writes.</small>
+        </div>
+        <div class="control-group">
+          <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" id="inf-mood" checked> <span>Mood steers temperature (T* from the sensorium)</span></label>
         </div>
         <div class="control-group">
           <label>Context Sequence</label>
@@ -2022,11 +2051,25 @@ class LanguageModel {
     return this.getEmptyState();
   }
 
-  forward(tokenId, state) {
+  // ctxVec (optional, Senses v2): a sense's context vector, added to the token's input while that
+  // sense is present, so what the model perceives stays in view instead of having to be remembered.
+  forward(tokenId, state, ctxVec = null) {
     const id = (tokenId >= 0 && tokenId < this.cfg.vocab) ? tokenId : 0;
-    let x = new Float32Array(this.cfg.dim);
+    const x = new Float32Array(this.cfg.dim);
     for (let i = 0; i < this.cfg.dim; i++) x[i] = this.embedding[id * this.cfg.dim + i];
+    if (ctxVec) for (let i = 0; i < this.cfg.dim; i++) x[i] += ctxVec[i];
+    return this._forwardX(x, state, id);
+  }
 
+  // Senses (2026-10-11): feed a vector that lives in embedding space instead of a token id.
+  // backward() then returns its gradient in gradIn rather than adding it to embGrad.
+  forwardVec(vec, state) {
+    const x = new Float32Array(this.cfg.dim);
+    for (let i = 0; i < this.cfg.dim; i++) x[i] = vec[i];
+    return this._forwardX(x, state, -1);
+  }
+
+  _forwardX(x, state, id) {
     // Self-embed + session_begin bookmark injection at position 0
     const isFirstToken = this._isFirstToken;
     if (this._isFirstToken) {
@@ -2077,7 +2120,8 @@ class LanguageModel {
     gradIn = this.ln_in.backward(gradIn, caches.lnIn);
     
     const embBase = caches.tokenId * this.cfg.dim;
-    for (let i = 0; i < this.cfg.dim; i++) this.embGrad[embBase + i] += gradIn[i];
+    if (caches.tokenId >= 0)            // token input -> embedding; sense input (-1) -> returned to the adapter
+      for (let i = 0; i < this.cfg.dim; i++) this.embGrad[embBase + i] += gradIn[i];
     
     if (caches.isFirstToken) {
       for (let i = 0; i < this.cfg.dim; i++) this.self_embedGrad[i] += gradIn[i];
@@ -2108,6 +2152,178 @@ class LanguageModel {
     for (const b of this.blocks) { b.ln1.zeroGrad(); b.ln2.zeroGrad(); if (b.zeroMuGrad) b.zeroMuGrad(); }
     for (const l of this.getLinearLayers()) l.zeroGrad();
   }
+}
+
+/* ╔══════════════════════════════════════════════════════════════════╗
+   ║     SENSES v2 — learned sense prefixes (Kehai Interim, 2026-10-11) ║
+   ║                                                                    ║
+   ║  A sense becomes K vectors in embedding space that the RWKV reads  ║
+   ║  BEFORE the text, exactly like tokens. Train on pairs              ║
+   ║  (photo.jpg + photo.txt, clip.wav + clip.txt) and the caption is   ║
+   ║  literally "what comes after seeing / hearing this".               ║
+   ║  features → SenseAdapter (trainable, exact gradient) → K prefixes  ║
+   ║  Features are deterministic pure functions (testable headless).    ║
+   ╚══════════════════════════════════════════════════════════════════╝ */
+const SENSE_K = 4;
+const SENSE_DIMS = { vision: 272, audio: 64 };
+
+const SenseFeatures = {
+  // img: {data (RGBA bytes), width, height} -> Float32Array(272)
+  //   [0..191]   8×8 colour grid, RGB in [-1, 1]
+  //   [192..255] 8×8 edge strength (luminance gradient), ~[0, 1]
+  //   [256..271] pre-attentive saliency: what stands out from the average colour, and where
+  //              (salient RGB, centroid x/y, spread, peak strength, mean RGB, contrast, ...)
+  image(img) {
+    const { data, width: W, height: H } = img, G = 8, out = new Float32Array(272), lum = new Float32Array(G * G);
+    for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
+      const x0 = Math.floor(gx * W / G), x1 = Math.max(x0 + 1, Math.floor((gx + 1) * W / G));
+      const y0 = Math.floor(gy * H / G), y1 = Math.max(y0 + 1, Math.floor((gy + 1) * H / G));
+      let r = 0, g = 0, b = 0, n = 0;
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const p = (y * W + x) * 4; r += data[p]; g += data[p + 1]; b += data[p + 2]; n++; }
+      r /= n * 255; g /= n * 255; b /= n * 255;
+      const c = gy * G + gx;
+      out[c * 3] = r * 2 - 1; out[c * 3 + 1] = g * 2 - 1; out[c * 3 + 2] = b * 2 - 1;
+      lum[c] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+    for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
+      const c = gy * G + gx;
+      const dx = lum[gy * G + Math.min(G - 1, gx + 1)] - lum[gy * G + Math.max(0, gx - 1)];
+      const dy = lum[Math.min(G - 1, gy + 1) * G + gx] - lum[Math.max(0, gy - 1) * G + gx];
+      out[192 + c] = Math.min(1, 2 * Math.sqrt(dx * dx + dy * dy));
+    }
+    // saliency: weight each cell by its squared colour distance from the image mean
+    let mr = 0, mg = 0, mb = 0; const NC = G * G;
+    for (let c = 0; c < NC; c++) { mr += out[c * 3]; mg += out[c * 3 + 1]; mb += out[c * 3 + 2]; }
+    mr /= NC; mg /= NC; mb /= NC;
+    let wS = 1e-9, sr = 0, sg = 0, sb = 0, cx = 0, cy = 0, peak = 0; const w = new Float32Array(NC);
+    for (let c = 0; c < NC; c++) { const d = (out[c * 3] - mr) ** 2 + (out[c * 3 + 1] - mg) ** 2 + (out[c * 3 + 2] - mb) ** 2; w[c] = d * d; peak = Math.max(peak, d); }
+    for (let c = 0; c < NC; c++) { const x = (c % G + 0.5) / G, y = (Math.floor(c / G) + 0.5) / G; wS += w[c]; sr += w[c] * out[c * 3]; sg += w[c] * out[c * 3 + 1]; sb += w[c] * out[c * 3 + 2]; cx += w[c] * x; cy += w[c] * y; }
+    sr /= wS; sg /= wS; sb /= wS; cx /= wS; cy /= wS;
+    let spread = 0; for (let c = 0; c < NC; c++) { const x = (c % G + 0.5) / G, y = (Math.floor(c / G) + 0.5) / G; spread += w[c] * ((x - cx) ** 2 + (y - cy) ** 2); }
+    let contrast = 0; for (let c = 0; c < NC; c++) contrast += Math.abs(lum[c] - (mr + mg + mb + 3) / 6);
+    const S = [sr, sg, sb, (cx - 0.5) * 4, (cy - 0.5) * 4, Math.sqrt(spread / wS) * 4, Math.sqrt(peak), mr, mg, mb,
+      sr - mr, sg - mg, sb - mb, contrast / NC * 4, (cx - 0.5) * 4 * Math.sqrt(peak), (cy - 0.5) * 4 * Math.sqrt(peak)];
+    for (let i = 0; i < 16; i++) out[256 + i] = S[i];
+    return out;
+  },
+
+  // pcm: Float32Array mono, sr: sample rate -> Float32Array(64)
+  //   [0..23] mean log-energy in 24 log-spaced bands (60 Hz .. 8 kHz) · [24..47] their std over time
+  //   [48..] loudness mean/std, zero-crossing mean/std, brightness mean/std, flux, onset rate, duration
+  audio(pcm, sr) {
+    const N = 1024, HOP = 512, NB = 24, out = new Float32Array(64);
+    const maxLen = Math.min(pcm.length, sr * 10);               // first 10 s
+    const fmin = 60, fmax = Math.min(8000, sr / 2 - 1);
+    const edges = []; for (let i = 0; i <= NB; i++) edges.push(Math.round(fmin * Math.pow(fmax / fmin, i / NB) * N / sr));
+    const win = new Float32Array(N); for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1));
+    const re = new Float32Array(N), im = new Float32Array(N);
+    const sumB = new Float64Array(NB), sqB = new Float64Array(NB);
+    let frames = 0, rmsS = 0, rmsQ = 0, zcS = 0, zcQ = 0, cenS = 0, cenQ = 0, fluxS = 0, onsets = 0, prevMag = null, prevRms = 0;
+    for (let st = 0; st + N <= Math.max(N, maxLen); st += HOP) {
+      let rms = 0, zc = 0;
+      for (let i = 0; i < N; i++) { const v = st + i < pcm.length ? pcm[st + i] : 0; re[i] = v * win[i]; im[i] = 0; rms += v * v; if (i && (v >= 0) !== ((st + i - 1 < pcm.length ? pcm[st + i - 1] : 0) >= 0)) zc++; }
+      rms = Math.sqrt(rms / N); zc /= N;
+      SenseFeatures._fft(re, im);
+      const mag = new Float32Array(N / 2); let num = 0, den = 1e-9;
+      for (let k = 0; k < N / 2; k++) { mag[k] = Math.hypot(re[k], im[k]); num += k * mag[k]; den += mag[k]; }
+      for (let bnd = 0; bnd < NB; bnd++) {
+        let e = 0; const a = edges[bnd], z = Math.max(a + 1, edges[bnd + 1]);
+        for (let k = a; k < z && k < N / 2; k++) e += mag[k] * mag[k];
+        const le = Math.log(e / (z - a) + 1e-8); sumB[bnd] += le; sqB[bnd] += le * le;
+      }
+      const cen = num / den / (N / 2);
+      let flux = 0; if (prevMag) for (let k = 0; k < N / 2; k++) { const d = mag[k] - prevMag[k]; if (d > 0) flux += d; }
+      prevMag = mag;
+      if (rms > 1.5 * prevRms + 0.01) onsets++; prevRms = rms;
+      rmsS += rms; rmsQ += rms * rms; zcS += zc; zcQ += zc * zc; cenS += cen; cenQ += cen * cen; fluxS += flux;
+      frames++;
+    }
+    const F = Math.max(1, frames), sd = (s, q) => Math.sqrt(Math.max(0, q / F - (s / F) ** 2));
+    for (let b = 0; b < NB; b++) { out[b] = (sumB[b] / F + 8) / 4; out[NB + b] = sd(sumB[b], sqB[b]) / 2; }
+    out[48] = 4 * rmsS / F; out[49] = 4 * sd(rmsS, rmsQ); out[50] = 4 * zcS / F; out[51] = 4 * sd(zcS, zcQ);
+    out[52] = 4 * cenS / F; out[53] = 4 * sd(cenS, cenQ); out[54] = Math.log1p(fluxS / F) / 2;
+    out[55] = onsets / F * 4; out[56] = Math.log1p(maxLen / sr) / 2;
+    return out;
+  },
+
+  _fft(re, im) {          // in-place radix-2
+    const n = re.length;
+    for (let i = 1, j = 0; i < n; i++) { let bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; } }
+    for (let len = 2; len <= n; len <<= 1) {
+      const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+      for (let i = 0; i < n; i += len) { let cr = 1, ci = 0;
+        for (let j = 0; j < len / 2; j++) {
+          const ar = re[i + j], ai = im[i + j], br = re[i + j + len / 2] * cr - im[i + j + len / 2] * ci, bi = re[i + j + len / 2] * ci + im[i + j + len / 2] * cr;
+          re[i + j] = ar + br; im[i + j] = ai + bi; re[i + j + len / 2] = ar - br; im[i + j + len / 2] = ai - bi;
+          const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+        } }
+    }
+  },
+};
+
+// features (F) -> standardized x̂ = (f − μ)/σ (running stats, like BatchNorm's) -> K prefix vectors in
+// embedding space: prefix_k = W_k·x̂ + b_k (float, Adam, exact gradient). Without standardization the
+// shared part of every image (background) dominates W·f and LayerNorm makes all images look alike.
+class SenseAdapter {
+  constructor(modality, F, dim, K = SENSE_K) {
+    this.mu = new Float32Array(F); this.var = new Float32Array(F).fill(1); this.nObs = 0;
+    this.modality = modality; this.F = F; this.dim = dim; this.K = K;
+    const n = K * dim * F, sw = 1 / Math.sqrt(F), sb = Math.sqrt(1 / dim) * 0.1;
+    this.W = new Float32Array(n); for (let i = 0; i < n; i++) this.W[i] = (Math.random() * 2 - 1) * sw;
+    this.b = new Float32Array(K * dim); for (let i = 0; i < this.b.length; i++) this.b[i] = (Math.random() * 2 - 1) * sb;
+    this.gW = new Float32Array(n); this.gb = new Float32Array(K * dim);
+    // context map C (dim × F), zero at init: the sense starts out adding nothing to the text
+    // stream and grows in only as fast as it proves useful
+    this.C = new Float32Array(dim * F); this.gC = new Float32Array(dim * F); this.mC = new Float32Array(dim * F); this.vC = new Float32Array(dim * F);
+    this.mW = new Float32Array(n); this.vW = new Float32Array(n); this.mb = new Float32Array(K * dim); this.vb = new Float32Array(K * dim);
+    this.t = 0; this.trainedSteps = 0;
+  }
+  observe(f) {                          // update running stats (training only)
+    this.nObs++; const a = Math.max(1 / this.nObs, 0.01);
+    for (let i = 0; i < this.F; i++) { const d = f[i] - this.mu[i]; this.mu[i] += a * d; this.var[i] += a * (d * (f[i] - this.mu[i]) - this.var[i]); }
+  }
+  norm(f) {
+    const x = new Float32Array(this.F);
+    for (let i = 0; i < this.F; i++) x[i] = (f[i] - this.mu[i]) / Math.sqrt(this.var[i] + 1e-4);
+    return x;
+  }
+  prefix(fRaw) {
+    const f = this.norm(fRaw), out = [];
+    for (let k = 0; k < this.K; k++) {
+      const v = new Float32Array(this.dim);
+      for (let d = 0; d < this.dim; d++) {
+        const row = (k * this.dim + d) * this.F; let s = this.b[k * this.dim + d];
+        for (let i = 0; i < this.F; i++) s += this.W[row + i] * f[i];
+        v[d] = s;
+      }
+      out.push(v);
+    }
+    return out;
+  }
+  context(fRaw) {                       // c = C·x̂, added to every token's input while the sense is present
+    const f = this.norm(fRaw), c = new Float32Array(this.dim);
+    for (let d = 0; d < this.dim; d++) { const row = d * this.F; let s = 0; for (let i = 0; i < this.F; i++) s += this.C[row + i] * f[i]; c[d] = s; }
+    return c;
+  }
+  accumulateContext(gradVec, xhat) {    // gradVec = dL/d(input of a token step); xhat = norm(f)
+    for (let d = 0; d < this.dim; d++) { const g = gradVec[d]; if (g === 0) continue; const row = d * this.F; for (let i = 0; i < this.F; i++) this.gC[row + i] += g * xhat[i]; }
+  }
+  accumulate(k, gradVec, fRaw) {        // gradVec = dL/d(prefix_k)
+    const f = this.norm(fRaw);
+    for (let d = 0; d < this.dim; d++) {
+      const g = gradVec[d]; if (g === 0) continue;
+      const row = (k * this.dim + d) * this.F;
+      this.gb[k * this.dim + d] += g;
+      for (let i = 0; i < this.F; i++) this.gW[row + i] += g * f[i];
+    }
+  }
+  step(lr, b1 = 0.9, b2 = 0.999, eps = 1e-8, wd = 0.01) {
+    this.t++; const c1 = 1 - Math.pow(b1, this.t), c2 = 1 - Math.pow(b2, this.t);
+    const upd = (P, G, M, V, decay) => { for (let i = 0; i < P.length; i++) { const g = G[i]; M[i] = b1 * M[i] + (1 - b1) * g; V[i] = b2 * V[i] + (1 - b2) * g * g; P[i] -= lr * (M[i] / c1 / (Math.sqrt(V[i] / c2) + eps) + decay * P[i]); G[i] = 0; } };
+    upd(this.W, this.gW, this.mW, this.vW, wd); upd(this.b, this.gb, this.mb, this.vb, 0); upd(this.C, this.gC, this.mC, this.vC, wd);
+    this.trainedSteps++;
+  }
+  zeroGrad() { this.gW.fill(0); this.gb.fill(0); this.gC.fill(0); }
 }
 
 /* ╔══════════════════════════════════════════════════════════════════╗
@@ -3767,6 +3983,45 @@ class Trainer {
     return totalLoss / (len - 1);
   }
 
+  // (Simulacra) a paired caption is ONE forward pass then backward from its caches: no recompute,
+  // so ROSA's in-block history advances once and cannot replay the caption into itself.
+  // Senses: [K sense prefixes] + caption tokens, full BPTT, loss on the caption only.
+  // The gradient reaching each prefix vector is handed to the adapter.
+  trainPaired(adapter, features, tokens) {
+    adapter.observe(features);
+    const pre = adapter.prefix(features), K = pre.length, T = tokens.length;
+    if (T < 1) return 0;
+    const ctxv = adapter.context(features), xhat = adapter.norm(features);
+    let state = this.model.getEmptyState();
+    const acts = [];
+    for (let i = 0; i < K + T - 1; i++) {                 // the last caption token is only a target
+      const r = i < K ? this.model.forwardVec(pre[i], state) : this.model.forward(tokens[i - K], state, ctxv);
+      acts.push(r); state = r.state;
+    }
+    let total = 0, stateGrads = this.model.blocks.map(() => ({ num: new Float32Array(this.model.cfg.dim), den: new Float32Array(this.model.cfg.dim) }));
+    for (let i = acts.length - 1; i >= 0; i--) {
+      let g;
+      if (i >= K - 1) { const r = this.computeLossAndGrad(acts[i].logits, tokens[i - K + 1]); total += r.loss; g = r.grad; }   // summed like trainSequence
+      else g = new Float32Array(this.model.cfg.vocab);
+      const res = this.model.backward(g, acts[i].caches, stateGrads);
+      stateGrads = res.gradStatesOut;
+      if (i < K) adapter.accumulate(i, res.gradIn, features);
+      else adapter.accumulateContext(res.gradIn, xhat);
+    }
+    return total / T;
+  }
+
+  // caption loss given a sense (no gradients): used by the sense-gap meter
+  captionLoss(adapter, features, tokens) {
+    const pre = adapter.prefix(features), ctxv = adapter.context(features); let state = this.model.getEmptyState(), r = null, total = 0;
+    for (const v of pre) { r = this.model.forwardVec(v, state); state = r.state; }
+    for (let t = 0; t < tokens.length; t++) {
+      total += this.computeLossAndGrad(r.logits, tokens[t]).loss;
+      if (t < tokens.length - 1) { r = this.model.forward(tokens[t], state, ctxv); state = r.state; }
+    }
+    return total / tokens.length;
+  }
+
   _snapshotRosa() {
     return {
       isFirst: this.model._isFirstToken,
@@ -4215,6 +4470,9 @@ const App = {
 
   totalSpikeCount: 0,
   _telemetry: [],
+
+  // Senses v2 (learned): paired corpus + trainable adapters
+  pairs: [], senses: null, inferSense: null, micRing: null, micRingPos: 0,
   innerMonologue: new InnerMonologue(2, CONFIG.rosa_vocab_size, 64),
 
   // ── ROSA-P-v1: sheafInject wires SimulacraBlock.forward() → InnerMonologue ──
@@ -4317,7 +4575,7 @@ function visionLoop() {
 
       // Inject into model state + sheaf + RIFT
       if (App.model && App.currentState) {
-        App.visionAdapter.injectIntoModel(encoded, App);
+        /* (2026-10-11) dead state-nudge removed (it was handed App, not the model, and never ran); senses reach the model as LEARNED prefixes + context (SENSES v2) and as mood (T*) */
         App.sheafMem.addContext('vision', encoded);
 
         // RIFT update on visual events
@@ -4405,7 +4663,7 @@ function handleImageUpload(input) {
           }
 
           if (App.model && App.currentState) {
-            App.spatialAdapter.injectIntoModel(encoded, App);
+            /* state-nudge removed: see SENSES v2 */
             App.sheafMem.addContext('spatial', encoded);
             runAutopoieticCheck();
           }
@@ -4490,6 +4748,9 @@ function audioLoop() {
 
   // Get raw waveform (spectrogram-free — no Mel conversion)
   analyser.getFloatTimeDomainData(pcmBuf);
+  // Senses v2: keep ~2 s of recent audio for the learned audio prefix
+  if (!App.micRing) { App.micRing = new Float32Array(Math.round((audioCtx ? audioCtx.sampleRate : 44100) * 2)); App.micRingPos = 0; }
+  for (let i = 0; i < pcmBuf.length; i++) { App.micRing[App.micRingPos] = pcmBuf[i]; App.micRingPos = (App.micRingPos + 1) % App.micRing.length; }
 
   // Draw waveform
   const canvas = document.getElementById('waveform-canvas');
@@ -4552,7 +4813,7 @@ function audioLoop() {
 
     // Inject into model state + sheaf + autopoietic check
     if (App.model && App.currentState) {
-      App.audioAdapter.injectIntoModel(encoded, App);
+      /* state-nudge removed: see SENSES v2 */
       App.sheafMem.addContext('audio', encoded);
 
       // RIFT update on actual acoustic events only
@@ -5073,13 +5334,17 @@ function handleFileDrop(e) {
 }
 
 async function initiateTokenizer() {
-  if (App.corpusText.length < 100) return sysLog('Corpus too small. Min 100 chars.', 'error');
+  const captions = App.pairs.map(p => p.text).join('\n');
+  const bpeText = App.corpusText + (captions ? '\n' + captions : '');
+  if (bpeText.length < 100) return sysLog('Corpus too small. Min 100 chars (text corpus + captions).', 'error');
   const targetVocab = parseInt(document.getElementById('cfg-vocab').value);
   document.getElementById('btn-build-bpe').disabled = true;
   sysLog('Initializing WebWorker BPE...', 'info');
   try {
-    await App.tokenizer.train(App.corpusText, targetVocab);
-    App.corpusData = App.tokenizer.encode(App.corpusText);
+    await App.tokenizer.train(bpeText, targetVocab);
+    App.corpusData = App.tokenizer.encode(App.corpusText.length >= 2 ? App.corpusText : bpeText);
+    for (const pr of App.pairs) pr.tokens = App.tokenizer.encode(pr.text);
+    if (App.pairs.length) sysLog(`Senses: ${App.pairs.length} captions tokenized.`, 'ok');
     document.getElementById('ft-tok').textContent = App.corpusData.length.toLocaleString();
     sysLog(`BPE compiled. Vocab: ${App.tokenizer.size}`, 'ok');
     document.getElementById('btn-alloc').disabled = false;
@@ -5107,6 +5372,7 @@ function allocateMemory() {
     App.audioAdapter   = new ModRWKVAdapter(64, cfg.dim, 'audio');
     App.spatialAdapter = new ModRWKVAdapter(64, cfg.dim, 'spatial');
     App.rift = new RIFTEngine(cfg.dim);
+    App.senses = makeSenseAdapters(cfg.dim);
 
     sysLog(`VM Allocated: ROSA-P-v1 (Simulacra) (${cfg.dim}D × ${cfg.layers}L) + SimulacraBlock + k·v complement + SpikeVox v2 + Re-WKV v2 + PGA`, 'ok');
     sysLog(`ROSA-v8: Suffix automaton is primary sequence mechanism. WKV kernel removed. self_embed identity anchor initialized.`, 'ok');
@@ -5186,12 +5452,22 @@ async function startTraining() {
     }
 
     try {
-      accumLoss += await App.trainer.trainSequence(sequence);
+      const mix = (parseFloat(document.getElementById('val-sense-mix')?.value) || 0);
+      const usable = App.pairs.filter(p => p.tokens && p.tokens.length);
+      if (usable.length && App.senses && Math.random() < mix) {
+        const pr = usable[Math.floor(Math.random() * usable.length)];
+        accumLoss += App.trainer.trainPaired(App.senses[pr.modality], pr.features, pr.tokens.slice(0, ctx));
+        await yieldToMain();
+      } else {
+        accumLoss += await App.trainer.trainSequence(sequence);
+      }
       microStep++;
       consecutiveErrors = 0;
 
       if (microStep >= CONFIG.grad_accum_steps) {
         await App.trainer.opt.step(App.model);
+        // senses: adapter at 0.1× the model LR (higher rates let the prefix wander and the model learns to ignore it)
+        if (App.senses) for (const a of Object.values(App.senses)) if (a.gW.some(v => v !== 0) || a.gC.some(v => v !== 0)) a.step(App.trainer.opt.lr * 0.1);
         App.model.embStep((lr * 0.1) / CONFIG.grad_accum_steps);
         App.model.zeroGrad();
 
@@ -5257,6 +5533,7 @@ async function startTraining() {
         // Update live RWKV state for sensorium
         App.currentState = App.model.getEmptyState();
 
+        if (App.pairs.length && App.trainer.globalStep % 25 === 0) updateSenseGap();
         if (App.trainer.globalStep % 5 === 0) {
           try { await sampleLiveText(); } catch(e) { sysLog('Live sample error (training continues): ' + e, 'warn'); }
         }
@@ -5309,13 +5586,102 @@ async function sampleLiveText() {
 }
 
 let activeInference = false;
+/* ── SENSES v2 — app glue ─────────────────────────────────────────── */
+function makeSenseAdapters(dim) {
+  return { vision: new SenseAdapter('vision', SENSE_DIMS.vision, dim), audio: new SenseAdapter('audio', SENSE_DIMS.audio, dim) };
+}
+function loadSenseAdapters(saved, isBase64) {
+  const ld = buf => new Float32Array(isBase64 ? base64ToBuffer(buf) : buf);
+  for (const [mod, d] of Object.entries(saved)) {
+    const a = App.senses[mod]; if (!a || d.F !== a.F || d.K !== a.K) { sysLog(`Sense adapter '${mod}' shape mismatch, re-initialised.`, 'warn'); continue; }
+    a.W = ld(d.W); a.b = ld(d.b); if (d.C) a.C = ld(d.C); a.mu = ld(d.mu); a.var = ld(d.var); a.nObs = d.nObs || 0; a.trainedSteps = d.trainedSteps || 0;
+  }
+  sysLog('Sense adapters restored.', 'ok');
+}
+async function imageDataFromSource(src) {          // File/Blob or a drawable -> ImageData (96×72)
+  const bmp = (src instanceof Blob) ? await createImageBitmap(src) : src;
+  const c = document.createElement('canvas'); c.width = 96; c.height = 72;
+  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(bmp, 0, 0, 96, 72);
+  return g.getImageData(0, 0, 96, 72);
+}
+async function audioPcmFromFile(file) {
+  const sr = 22050, ctx = new OfflineAudioContext(1, sr, sr);
+  const buf = await ctx.decodeAudioData(await file.arrayBuffer());
+  const n = buf.length, out = new Float32Array(n);
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) { const d = buf.getChannelData(ch); for (let i = 0; i < n; i++) out[i] += d[i] / buf.numberOfChannels; }
+  return { pcm: out, sr: buf.sampleRate };
+}
+async function senseFromFile(file) {
+  if (file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name)) return { modality: 'vision', features: SenseFeatures.image(await imageDataFromSource(file)) };
+  if (file.type.startsWith('audio/') || /\.(wav|mp3|ogg|flac|m4a|aac|webm)$/i.test(file.name)) { const { pcm, sr } = await audioPcmFromFile(file); return { modality: 'audio', features: SenseFeatures.audio(pcm, sr) }; }
+  return null;
+}
+async function loadSensePairs(fileList) {
+  const files = Array.from(fileList || []), stem = n => n.replace(/\.[^.]+$/, '').toLowerCase();
+  const texts = new Map(), media = [];
+  for (const f of files) { if (/\.(txt|md)$/i.test(f.name)) texts.set(stem(f.name), f); else media.push(f); }
+  let added = 0, skipped = [];
+  for (const f of media) {
+    const tf = texts.get(stem(f.name));
+    if (!tf) { skipped.push(f.name); continue; }
+    try {
+      const sense = await senseFromFile(f);
+      if (!sense) { skipped.push(f.name); continue; }
+      const text = (await tf.text()).trim();
+      if (!text) { skipped.push(f.name); continue; }
+      App.pairs.push({ name: f.name, modality: sense.modality, features: sense.features, text, tokens: App.tokenizer.trained ? App.tokenizer.encode(text) : null });
+      added++;
+    } catch (e) { skipped.push(`${f.name} (${e.message})`); }
+    await yieldToMain();
+  }
+  const nV = App.pairs.filter(p => p.modality === 'vision').length, nA = App.pairs.length - nV;
+  document.getElementById('sense-status').textContent = `${App.pairs.length} pairs (${nV} images, ${nA} sounds).` + (skipped.length ? ` Skipped ${skipped.length} without a matching .txt: ${skipped.slice(0, 4).join(', ')}${skipped.length > 4 ? '…' : ''}` : '') + (App.tokenizer.trained ? '' : ' Now compile BPE.');
+  sysLog(`Senses: +${added} pairs (${skipped.length} skipped).`, added ? 'ok' : 'warn');
+}
+function updateSenseGap() {
+  if (!App.senses || !App.trainer) return;
+  let gap = 0, n = 0;
+  for (const mod of ['vision', 'audio']) {
+    const ps = App.pairs.filter(p => p.modality === mod && p.tokens && p.tokens.length);
+    if (ps.length < 2) continue;
+    for (let i = 0; i < Math.min(6, ps.length); i++) {
+      const a = ps[Math.floor(Math.random() * ps.length)]; let b = ps[Math.floor(Math.random() * ps.length)];
+      if (b === a) b = ps[(ps.indexOf(a) + 1) % ps.length];
+      const toks = a.tokens.slice(0, 48);
+      gap += App.trainer.captionLoss(App.senses[mod], b.features, toks) - App.trainer.captionLoss(App.senses[mod], a.features, toks); n++;
+    }
+  }
+  if (n) { const g = gap / n, el = document.getElementById('ui-sense-gap'); el.textContent = `${g >= 0 ? '+' : ''}${g.toFixed(3)} nats`; el.style.color = g > 0.05 ? 'var(--accent)' : ''; }
+}
+async function setInferenceSenseFile(file) {
+  if (!file) return;
+  try { App.inferSense = await senseFromFile(file); document.getElementById('inf-sense-status').textContent = App.inferSense ? `Ready: ${App.inferSense.modality} from ${file.name}` : 'Unsupported file.'; }
+  catch (e) { document.getElementById('inf-sense-status').textContent = 'Could not read: ' + e.message; }
+}
+async function getInferenceSense() {
+  const mode = document.getElementById('inf-sense')?.value || 'none';
+  if (mode === 'file') return App.inferSense;
+  if (mode === 'camera') {
+    const v = document.getElementById('webcam-el');
+    if (!cameraActive || !v || v.readyState < 2) throw new Error('camera is not running');
+    return { modality: 'vision', features: SenseFeatures.image(await imageDataFromSource(v)) };
+  }
+  if (mode === 'mic') {
+    if (!micActive || !App.micRing) throw new Error('microphone is not running');
+    const r = App.micRing, ord = new Float32Array(r.length); for (let i = 0; i < r.length; i++) ord[i] = r[(App.micRingPos + i) % r.length];
+    return { modality: 'audio', features: SenseFeatures.audio(ord, audioCtx ? audioCtx.sampleRate : 44100) };
+  }
+  return null;
+}
+
 async function startInference() {
   if (!App.model) return sysLog('Model required.', 'error');
   activeInference = true;
   document.getElementById('btn-infer-run').disabled = true;
   document.getElementById('btn-infer-stop').disabled = false;
 
-  const prompt = document.getElementById('inf-prompt').value || ' ';
+  const rawPrompt = document.getElementById('inf-prompt').value;
+  const prompt = rawPrompt || ' ';
   const t = parseFloat(document.getElementById('inf-temp').value) / 100;
   const p = parseFloat(document.getElementById('inf-topp').value) / 100;
   const max = parseInt(document.getElementById('inf-maxt').value);
@@ -5329,16 +5695,40 @@ async function startInference() {
   const ids = App.tokenizer.encode(prompt);
   let lastId = ids.length > 0 ? ids[ids.length-1] : 0;
 
-  for (let i = 0; i < ids.length - 1; i++) state = App.model.forward(ids[i], state).state;
+  // Senses v2: read the chosen sense first (learned prefix), keep it in view (context), then the prompt.
+  // With no prompt, the first token is sampled straight from what the model expects after the sense.
+  let pendingLogits = null, senseCtx = null, senseAd = null;
+  const liveSense = ['camera', 'mic'].includes(document.getElementById('inf-sense')?.value);
+  try {
+    const sense = await getInferenceSense();
+    if (sense && App.senses && App.senses[sense.modality]) {
+      senseAd = App.senses[sense.modality]; senseCtx = senseAd.context(sense.features);
+      for (const v of senseAd.prefix(sense.features)) { const r = App.model.forwardVec(v, state); state = r.state; pendingLogits = r.logits; }
+      if (rawPrompt) pendingLogits = null;
+      outBox.innerHTML = `<span style="opacity:0.5">[${sense.modality}] ${prompt}</span>`;
+    }
+  } catch (e) { sysLog('Sense prefix skipped: ' + e.message, 'warn'); }
+  // Mood: the sensorium's semantic temperature T* (0..1) steers sampling temperature
+  let tEff = t;
+  if (document.getElementById('inf-mood')?.checked && App.boolPhase) {
+    const tStar = App.boolPhase.semanticTemp || 0;
+    tEff = t * (0.7 + 0.6 * tStar);
+    sysLog(`Mood: T* ${tStar.toFixed(2)} → temperature ${t.toFixed(2)} × ${(0.7 + 0.6 * tStar).toFixed(2)} = ${tEff.toFixed(2)}`, 'info');
+  }
+
+  for (let i = 0; i < ids.length - 1; i++) state = App.model.forward(ids[i], state, senseCtx).state;
 
   let buffer = '';
   const recentTokens = [...ids];
   try {
     for (let i = 0; i < max && activeInference; i++) {
-      const res = App.model.forward(lastId, state);
+      // live camera/mic: refresh what the model is perceiving every 8 tokens
+      if (liveSense && senseAd && i > 0 && i % 8 === 0) { try { const s2 = await getInferenceSense(); if (s2 && App.senses[s2.modality] === senseAd) senseCtx = senseAd.context(s2.features); } catch (e) {} }
+      const res = pendingLogits ? { logits: pendingLogits, state } : App.model.forward(lastId, state, senseCtx);
+      pendingLogits = null;
       state = res.state;
       App.currentState = state;
-      lastId = sampleLogitsExtended(res.logits, t, p, topK, repPenalty, recentTokens);
+      lastId = sampleLogitsExtended(res.logits, tEff, p, topK, repPenalty, recentTokens);
       recentTokens.push(lastId);
       buffer += App.tokenizer.decode([lastId]);
       outBox.innerHTML = `<span style="opacity:0.5">${prompt}</span><span class="highlight">${buffer}</span>`;
@@ -5552,6 +5942,14 @@ async function exportModel() {
   // .simpip: rosa_states (optional — include if blocks have accumulated history)
   state.rosa_states = App.model.blocks.map(b => b.getRosaState());
 
+  if (App.senses) {
+    state.senses = {};
+    for (const [mod, a] of Object.entries(App.senses)) state.senses[mod] = {
+      F: a.F, K: a.K, nObs: a.nObs, trainedSteps: a.trainedSteps,
+      W: await bufferToBase64Async(a.W.buffer), b: await bufferToBase64Async(a.b.buffer), C: await bufferToBase64Async(a.C.buffer),
+      mu: await bufferToBase64Async(a.mu.buffer), var: await bufferToBase64Async(a.var.buffer) };
+  }
+
   const filename = buildExportFilename(fmt);
   const blob = new Blob([JSON.stringify(state)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -5666,6 +6064,8 @@ function hydrateFromData(data, isBase64) {
   App.audioAdapter   = new ModRWKVAdapter(64, data.cfg.dim, 'audio');
   App.spatialAdapter = new ModRWKVAdapter(64, data.cfg.dim, 'spatial');
   App.rift = new RIFTEngine(data.cfg.dim);
+  App.senses = makeSenseAdapters(data.cfg.dim);
+  if (data.senses) loadSenseAdapters(data.senses, isBase64);
   // Reinit InnerMonologue with correct layer count and dim
   App.innerMonologue = new InnerMonologue(
     data.cfg.layers || 2, CONFIG.rosa_vocab_size, data.cfg.dim || 64);
