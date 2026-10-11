@@ -196,6 +196,8 @@ Predecessor credits: BlinkDL (RWKV-v8 ROSA research — Simulacra's ROSA-primary
 
 ## Changelog
 
+- Speed, Tier 0 (2026-10-11 · Kehai Interim): fused cache-friendly BitLinear backward; Muon rebuilt (Newton–Schulz on the smaller side with cache-friendly loops, same update to 1e-6, ~2x faster; output head on AdamW per the original Muon recipe); **AdamW is now the default**, because on CPU Muon costs O(dim³) per matrix per step. Measured on HTMLNLM, a default training step went from ~104 s to ~11 s on one CPU thread. Gradient check still exact.
+
 ### v0.1.4 — 2026-10-11 · Kehai Interim
 
 **Backward pass rebuilt and verified; OOMB recompute leak closed.** Both found with a finite-difference gradient check and fixed against it.
