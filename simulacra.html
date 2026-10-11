@@ -685,7 +685,7 @@ footer { display: flex; gap: 24px; align-items: center; padding: 12px 24px; back
         <div class="panel-header">SENSES — PAIRED CORPUS (LEARNED)</div>
         <div class="dropzone" id="sense-dropzone" onclick="document.getElementById('sense-upload').click()" ondragover="event.preventDefault(); this.classList.add('dragover');" ondragleave="this.classList.remove('dragover');" ondrop="event.preventDefault(); this.classList.remove('dragover'); loadSensePairs(event.dataTransfer.files);">
           <span style="font-size:14px; font-weight:700; color:var(--text-main);">Drop paired files here or click</span><br>
-          <span style="font-size:12px; opacity:0.6; margin-top:8px; display:inline-block;">photo.jpg + photo.txt · clip.wav + clip.txt — matched by name. Images and sounds become what the model sees and hears before reading the caption.</span>
+          <span style="font-size:12px; opacity:0.6; margin-top:8px; display:inline-block;">photo.jpg + photo.txt · clip.wav + clip.txt — matched by name. Images become 16 patch tokens (32×32, filters learned from your own images); sounds become a 16 kHz stream (one token per 40 ms, up to 4 s). The model reads them before the caption.</span>
         </div>
         <input type="file" id="sense-upload" multiple accept="image/*,audio/*,.txt,.md" style="display:none" onchange="loadSensePairs(this.files)">
         <div id="sense-status" style="font-size:12px; opacity:0.8; margin-top:10px;">No pairs loaded. Load pairs BEFORE compiling BPE so captions join the vocabulary.</div>
@@ -2155,95 +2155,161 @@ class LanguageModel {
 }
 
 /* ╔══════════════════════════════════════════════════════════════════╗
-   ║     SENSES v2 — learned sense prefixes (Kehai Interim, 2026-10-11) ║
+   ║     SENSES v3 — eyes and ears as token streams                    ║
+   ║     (Kehai Interim, 2026-10-11; v2 learned prefixes, v3 streams)   ║
    ║                                                                    ║
-   ║  A sense becomes K vectors in embedding space that the RWKV reads  ║
-   ║  BEFORE the text, exactly like tokens. Train on pairs              ║
-   ║  (photo.jpg + photo.txt, clip.wav + clip.txt) and the caption is   ║
-   ║  literally "what comes after seeing / hearing this".               ║
-   ║  features → SenseAdapter (trainable, exact gradient) → K prefixes  ║
-   ║  Features are deterministic pure functions (testable headless).    ║
+   ║  A sense becomes a SEQUENCE of vectors in embedding space that the ║
+   ║  model reads before the text, plus a context vector added to every ║
+   ║  text token while the sense is present.                            ║
+   ║   eyes: 32×32 colour image → 16 patch tokens (4×4 grid of 8×8      ║
+   ║         cells), each = downsampled colour + texture responses to   ║
+   ║         filters LEARNED from unlabeled images (ZCA + k-means,      ║
+   ║         Coates & Ng 2011), plus a learned position per cell.       ║
+   ║   ears: 16 kHz → 40 mel bands, 25 ms frames every 10 ms, 4 frames  ║
+   ║         per token (one token per 40 ms, up to 4 s) — order kept,   ║
+   ║         so "dog" and "god" are different streams.                  ║
+   ║  Train on pairs (photo.jpg + photo.txt, clip.wav + clip.txt): the  ║
+   ║  caption is literally "what comes after seeing / hearing this".    ║
+   ║  Feature extractors are pure functions (testable headless).        ║
    ╚══════════════════════════════════════════════════════════════════╝ */
-const SENSE_K = 4;
-const SENSE_DIMS = { vision: 272, audio: 64 };
+const EYE_RES = 32, EYE_CELL = 8, EYE_SUB = 4, EYE_STRIDE = 2, EYE_KM = 32;
+const EAR_SR = 16000, EAR_MELS = 40, EAR_GROUP = 4, EAR_MAXTOK = 100;
+const EYE_TOK = (EYE_RES / EYE_CELL) ** 2;                         // 16 patch tokens
+const SENSE_SPEC = {
+  // Fq (the context summary) keeps COARSE STRUCTURE: per image quadrant, per quarter of the clip.
+  // An order-free summary could not keep "a then i" apart from "i then a" in view while writing.
+  vision: { Fp: 48 + EYE_KM, Fq: 5 * (48 + EYE_KM), Tmax: EYE_TOK, pos: true },
+  audio:  { Fp: EAR_MELS * EAR_GROUP, Fq: 6 * EAR_MELS + 1, Tmax: EAR_MAXTOK, pos: false },
+};
 
 const SenseFeatures = {
-  // img: {data (RGBA bytes), width, height} -> Float32Array(272)
-  //   [0..191]   8×8 colour grid, RGB in [-1, 1]
-  //   [192..255] 8×8 edge strength (luminance gradient), ~[0, 1]
-  //   [256..271] pre-attentive saliency: what stands out from the average colour, and where
-  //              (salient RGB, centroid x/y, spread, peak strength, mean RGB, contrast, ...)
-  image(img) {
-    const { data, width: W, height: H } = img, G = 8, out = new Float32Array(272), lum = new Float32Array(G * G);
-    for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
-      const x0 = Math.floor(gx * W / G), x1 = Math.max(x0 + 1, Math.floor((gx + 1) * W / G));
-      const y0 = Math.floor(gy * H / G), y1 = Math.max(y0 + 1, Math.floor((gy + 1) * H / G));
+  // ── EYES ────────────────────────────────────────────────────────────
+  // img: {data (RGBA), width, height} -> Uint8Array(32·32·3), box-filtered
+  image32(img) {
+    const { data, width: W, height: H } = img, R = EYE_RES, out = new Uint8Array(R * R * 3);
+    for (let y = 0; y < R; y++) for (let x = 0; x < R; x++) {
+      const x0 = Math.floor(x * W / R), x1 = Math.max(x0 + 1, Math.floor((x + 1) * W / R));
+      const y0 = Math.floor(y * H / R), y1 = Math.max(y0 + 1, Math.floor((y + 1) * H / R));
       let r = 0, g = 0, b = 0, n = 0;
-      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const p = (y * W + x) * 4; r += data[p]; g += data[p + 1]; b += data[p + 2]; n++; }
-      r /= n * 255; g /= n * 255; b /= n * 255;
-      const c = gy * G + gx;
-      out[c * 3] = r * 2 - 1; out[c * 3 + 1] = g * 2 - 1; out[c * 3 + 2] = b * 2 - 1;
-      lum[c] = 0.299 * r + 0.587 * g + 0.114 * b;
+      for (let yy = y0; yy < y1; yy++) for (let xx = x0; xx < x1; xx++) { const p = (yy * W + xx) * 4; r += data[p]; g += data[p + 1]; b += data[p + 2]; n++; }
+      const o = (y * R + x) * 3; out[o] = r / n; out[o + 1] = g / n; out[o + 2] = b / n;
     }
-    for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
-      const c = gy * G + gx;
-      const dx = lum[gy * G + Math.min(G - 1, gx + 1)] - lum[gy * G + Math.max(0, gx - 1)];
-      const dy = lum[Math.min(G - 1, gy + 1) * G + gx] - lum[Math.max(0, gy - 1) * G + gx];
-      out[192 + c] = Math.min(1, 2 * Math.sqrt(dx * dx + dy * dy));
-    }
-    // saliency: weight each cell by its squared colour distance from the image mean
-    let mr = 0, mg = 0, mb = 0; const NC = G * G;
-    for (let c = 0; c < NC; c++) { mr += out[c * 3]; mg += out[c * 3 + 1]; mb += out[c * 3 + 2]; }
-    mr /= NC; mg /= NC; mb /= NC;
-    let wS = 1e-9, sr = 0, sg = 0, sb = 0, cx = 0, cy = 0, peak = 0; const w = new Float32Array(NC);
-    for (let c = 0; c < NC; c++) { const d = (out[c * 3] - mr) ** 2 + (out[c * 3 + 1] - mg) ** 2 + (out[c * 3 + 2] - mb) ** 2; w[c] = d * d; peak = Math.max(peak, d); }
-    for (let c = 0; c < NC; c++) { const x = (c % G + 0.5) / G, y = (Math.floor(c / G) + 0.5) / G; wS += w[c]; sr += w[c] * out[c * 3]; sg += w[c] * out[c * 3 + 1]; sb += w[c] * out[c * 3 + 2]; cx += w[c] * x; cy += w[c] * y; }
-    sr /= wS; sg /= wS; sb /= wS; cx /= wS; cy /= wS;
-    let spread = 0; for (let c = 0; c < NC; c++) { const x = (c % G + 0.5) / G, y = (Math.floor(c / G) + 0.5) / G; spread += w[c] * ((x - cx) ** 2 + (y - cy) ** 2); }
-    let contrast = 0; for (let c = 0; c < NC; c++) contrast += Math.abs(lum[c] - (mr + mg + mb + 3) / 6);
-    const S = [sr, sg, sb, (cx - 0.5) * 4, (cy - 0.5) * 4, Math.sqrt(spread / wS) * 4, Math.sqrt(peak), mr, mg, mb,
-      sr - mr, sg - mg, sb - mb, contrast / NC * 4, (cx - 0.5) * 4 * Math.sqrt(peak), (cy - 0.5) * 4 * Math.sqrt(peak)];
-    for (let i = 0; i < 16; i++) out[256 + i] = S[i];
     return out;
   },
-
-  // pcm: Float32Array mono, sr: sample rate -> Float32Array(64)
-  //   [0..23] mean log-energy in 24 log-spaced bands (60 Hz .. 8 kHz) · [24..47] their std over time
-  //   [48..] loudness mean/std, zero-crossing mean/std, brightness mean/std, flux, onset rate, duration
-  audio(pcm, sr) {
-    const N = 1024, HOP = 512, NB = 24, out = new Float32Array(64);
-    const maxLen = Math.min(pcm.length, sr * 10);               // first 10 s
-    const fmin = 60, fmax = Math.min(8000, sr / 2 - 1);
-    const edges = []; for (let i = 0; i <= NB; i++) edges.push(Math.round(fmin * Math.pow(fmax / fmin, i / NB) * N / sr));
-    const win = new Float32Array(N); for (let i = 0; i < N; i++) win[i] = 0.5 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1));
-    const re = new Float32Array(N), im = new Float32Array(N);
-    const sumB = new Float64Array(NB), sqB = new Float64Array(NB);
-    let frames = 0, rmsS = 0, rmsQ = 0, zcS = 0, zcQ = 0, cenS = 0, cenQ = 0, fluxS = 0, onsets = 0, prevMag = null, prevRms = 0;
-    for (let st = 0; st + N <= Math.max(N, maxLen); st += HOP) {
-      let rms = 0, zc = 0;
-      for (let i = 0; i < N; i++) { const v = st + i < pcm.length ? pcm[st + i] : 0; re[i] = v * win[i]; im[i] = 0; rms += v * v; if (i && (v >= 0) !== ((st + i - 1 < pcm.length ? pcm[st + i - 1] : 0) >= 0)) zc++; }
-      rms = Math.sqrt(rms / N); zc /= N;
-      SenseFeatures._fft(re, im);
-      const mag = new Float32Array(N / 2); let num = 0, den = 1e-9;
-      for (let k = 0; k < N / 2; k++) { mag[k] = Math.hypot(re[k], im[k]); num += k * mag[k]; den += mag[k]; }
-      for (let bnd = 0; bnd < NB; bnd++) {
-        let e = 0; const a = edges[bnd], z = Math.max(a + 1, edges[bnd + 1]);
-        for (let k = a; k < z && k < N / 2; k++) e += mag[k] * mag[k];
-        const le = Math.log(e / (z - a) + 1e-8); sumB[bnd] += le; sqB[bnd] += le * le;
-      }
-      const cen = num / den / (N / 2);
-      let flux = 0; if (prevMag) for (let k = 0; k < N / 2; k++) { const d = mag[k] - prevMag[k]; if (d > 0) flux += d; }
-      prevMag = mag;
-      if (rms > 1.5 * prevRms + 0.01) onsets++; prevRms = rms;
-      rmsS += rms; rmsQ += rms * rms; zcS += zc; zcQ += zc * zc; cenS += cen; cenQ += cen * cen; fluxS += flux;
-      frames++;
-    }
-    const F = Math.max(1, frames), sd = (s, q) => Math.sqrt(Math.max(0, q / F - (s / F) ** 2));
-    for (let b = 0; b < NB; b++) { out[b] = (sumB[b] / F + 8) / 4; out[NB + b] = sd(sumB[b], sqB[b]) / 2; }
-    out[48] = 4 * rmsS / F; out[49] = 4 * sd(rmsS, rmsQ); out[50] = 4 * zcS / F; out[51] = 4 * sd(zcS, zcQ);
-    out[52] = 4 * cenS / F; out[53] = 4 * sd(cenS, cenQ); out[54] = Math.log1p(fluxS / F) / 2;
-    out[55] = onsets / F * 4; out[56] = Math.log1p(maxLen / sr) / 2;
+  _subpatch(rgb, x0, y0, out) {                 // 4×4×3 sub-patch, contrast-normalised (Coates: var + 10)
+    let k = 0, m = 0;
+    for (let y = 0; y < EYE_SUB; y++) for (let x = 0; x < EYE_SUB; x++) { const p = ((y0 + y) * EYE_RES + x0 + x) * 3; out[k++] = rgb[p]; out[k++] = rgb[p + 1]; out[k++] = rgb[p + 2]; }
+    for (let i = 0; i < 48; i++) m += out[i]; m /= 48;
+    let v = 0; for (let i = 0; i < 48; i++) { out[i] -= m; v += out[i] * out[i]; }
+    const sd = Math.sqrt(v / 47 + 10); for (let i = 0; i < 48; i++) out[i] /= sd;
     return out;
+  },
+  // learn K texture filters from unlabeled 32×32 images (ZCA whitening + k-means)
+  learnEyeFilters(images, K = EYE_KM, maxPatches = 20000, iters = 12) {
+    const D = 48, pts = [], tmp = new Float32Array(D), span = EYE_RES - EYE_SUB + 1;
+    const per = Math.max(1, Math.ceil(maxPatches / Math.max(1, images.length)));
+    for (const rgb of images) for (let j = 0; j < per && pts.length < maxPatches; j++)
+      pts.push(Float32Array.from(this._subpatch(rgb, Math.floor(Math.random() * span), Math.floor(Math.random() * span), tmp)));
+    if (pts.length < K * 4) return null;
+    const mean = new Float64Array(D); for (const p of pts) for (let i = 0; i < D; i++) mean[i] += p[i] / pts.length;
+    const cov = new Float64Array(D * D);
+    for (const p of pts) for (let i = 0; i < D; i++) { const a = p[i] - mean[i]; for (let j = i; j < D; j++) cov[i * D + j] += a * (p[j] - mean[j]); }
+    for (let i = 0; i < D; i++) for (let j = i; j < D; j++) { cov[i * D + j] /= pts.length - 1; cov[j * D + i] = cov[i * D + j]; }
+    const { vals, vecs } = symEig(cov, D), zca = new Float32Array(D * D);
+    for (let i = 0; i < D; i++) for (let j = 0; j < D; j++) { let s = 0; for (let k = 0; k < D; k++) s += vecs[i * D + k] * vecs[j * D + k] / Math.sqrt(Math.max(0, vals[k]) + 0.1); zca[i * D + j] = s; }
+    const filt = { K, mean: Float32Array.from(mean), zca, centroids: new Float32Array(K * D) };
+    const W = pts.map(p => this._whiten(p, filt));
+    const C = filt.centroids, assign = new Int32Array(W.length);
+    for (let k = 0; k < K; k++) C.set(W[Math.floor(Math.random() * W.length)], k * D);
+    for (let it = 0; it < iters; it++) {
+      for (let n = 0; n < W.length; n++) { let best = 0, bd = Infinity; for (let k = 0; k < K; k++) { let d = 0; for (let i = 0; i < D; i++) { const t = W[n][i] - C[k * D + i]; d += t * t; } if (d < bd) { bd = d; best = k; } } assign[n] = best; }
+      const sum = new Float64Array(K * D), cnt = new Int32Array(K);
+      for (let n = 0; n < W.length; n++) { const k = assign[n]; cnt[k]++; for (let i = 0; i < D; i++) sum[k * D + i] += W[n][i]; }
+      for (let k = 0; k < K; k++) {
+        if (!cnt[k]) { C.set(W[Math.floor(Math.random() * W.length)], k * D); continue; }   // re-seed an empty cluster
+        for (let i = 0; i < D; i++) C[k * D + i] = sum[k * D + i] / cnt[k];
+      }
+    }
+    return filt;
+  },
+  _whiten(p, filt) {
+    const D = 48, c = new Float32Array(D), o = new Float32Array(D);
+    for (let i = 0; i < D; i++) c[i] = p[i] - filt.mean[i];
+    for (let i = 0; i < D; i++) { let s = 0; const r = i * D; for (let j = 0; j < D; j++) s += filt.zca[r + j] * c[j]; o[i] = s; }
+    return o;
+  },
+  // rgb32 -> { T: 16, Fp, seq: Float32Array(16·Fp), pooled: Float32Array(Fq) }
+  //   per cell: 4×4×3 downsampled colour in [-1,1] (48) + K "triangle" texture responses (Coates & Ng)
+  //   pooled: mean per quadrant + max over cells
+  imageTokens(rgb, filt) {
+    const spec = SENSE_SPEC.vision, Fp = spec.Fp, G = EYE_RES / EYE_CELL, T = G * G, seq = new Float32Array(T * Fp), tmp = new Float32Array(48);
+    for (let cy = 0; cy < G; cy++) for (let cx = 0; cx < G; cx++) {
+      const t = cy * G + cx, base = t * Fp;
+      for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) for (let c = 0; c < 3; c++) {
+        let s = 0; for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) s += rgb[((cy * EYE_CELL + y * 2 + dy) * EYE_RES + cx * EYE_CELL + x * 2 + dx) * 3 + c];
+        seq[base + (y * 4 + x) * 3 + c] = s / (4 * 127.5) - 1;
+      }
+      if (!filt) continue;                                        // texture channels stay 0 until filters are learned
+      const K = filt.K, z = new Float32Array(K); let nSub = 0;
+      for (let sy = 0; sy + EYE_SUB <= EYE_CELL; sy += EYE_STRIDE) for (let sx = 0; sx + EYE_SUB <= EYE_CELL; sx += EYE_STRIDE) {
+        const w = this._whiten(this._subpatch(rgb, cx * EYE_CELL + sx, cy * EYE_CELL + sy, tmp), filt);
+        let mu = 0; for (let k = 0; k < K; k++) { let d = 0; for (let i = 0; i < 48; i++) { const q = w[i] - filt.centroids[k * 48 + i]; d += q * q; } z[k] = Math.sqrt(d); mu += z[k]; }
+        mu /= K; for (let k = 0; k < K; k++) seq[base + 48 + k] += Math.max(0, mu - z[k]);
+        nSub++;
+      }
+      for (let k = 0; k < K; k++) seq[base + 48 + k] /= nSub;
+    }
+    const pooled = new Float32Array(spec.Fq);                     // mean per quadrant (2×2 cells each) + max over all cells
+    for (let i = 0; i < Fp; i++) {
+      let mx = -Infinity;
+      for (let t = 0; t < T; t++) { const v = seq[t * Fp + i], q = (Math.floor(t / G) >= G / 2 ? 2 : 0) + (t % G >= G / 2 ? 1 : 0); pooled[q * Fp + i] += v / (T / 4); if (v > mx) mx = v; }
+      pooled[4 * Fp + i] = mx;
+    }
+    return { T, Fp, seq, pooled };
+  },
+
+  // ── EARS ────────────────────────────────────────────────────────────
+  _melBank: null,
+  _mel(nfft, sr) {
+    if (this._melBank) return this._melBank;
+    const hz2mel = f => 2595 * Math.log10(1 + f / 700), mel2hz = m => 700 * (10 ** (m / 2595) - 1);
+    const lo = hz2mel(60), hi = hz2mel(7600), pts = [];
+    for (let i = 0; i < EAR_MELS + 2; i++) pts.push(Math.floor((nfft + 1) * mel2hz(lo + (hi - lo) * i / (EAR_MELS + 1)) / sr));
+    const bank = [];
+    for (let m = 1; m <= EAR_MELS; m++) { const f = new Float32Array(nfft / 2 + 1);
+      for (let k = pts[m - 1]; k < pts[m]; k++) f[k] = (k - pts[m - 1]) / Math.max(1, pts[m] - pts[m - 1]);
+      for (let k = pts[m]; k < pts[m + 1]; k++) f[k] = (pts[m + 1] - k) / Math.max(1, pts[m + 1] - pts[m]);
+      bank.push(f); }
+    return (this._melBank = bank);
+  },
+  // pcm (any rate) -> { T, Fp: 160, seq (one token = 4 frames × 40 log-mel, 40 ms), pooled (see below) }
+  audioTokens(pcmIn, srIn) {
+    const sr = EAR_SR, ratio = srIn / sr, maxLen = Math.min(Math.floor(pcmIn.length / ratio), EAR_MAXTOK * EAR_GROUP * 160 + 240);
+    const pcm = new Float32Array(Math.max(400, maxLen));
+    for (let i = 0; i < maxLen; i++) { const x = i * ratio, j = Math.floor(x), f = x - j; pcm[i] = (pcmIn[j] || 0) * (1 - f) + (pcmIn[j + 1] || 0) * f; }
+    for (let i = pcm.length - 1; i > 0; i--) pcm[i] -= 0.97 * pcm[i - 1];          // pre-emphasis
+    const N = 512, WIN = 400, HOP = 160, bank = this._mel(N, sr), re = new Float32Array(N), im = new Float32Array(N);
+    const nFrames = Math.max(1, Math.floor((pcm.length - WIN) / HOP) + 1), frames = [];
+    for (let fi = 0; fi < nFrames; fi++) {
+      re.fill(0); im.fill(0);
+      for (let i = 0; i < WIN; i++) re[i] = (pcm[fi * HOP + i] || 0) * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / (WIN - 1)));
+      SenseFeatures._fft(re, im);
+      const fr = new Float32Array(EAR_MELS);
+      for (let m = 0; m < EAR_MELS; m++) { let e = 0; const f = bank[m]; for (let k = 0; k <= N / 2; k++) if (f[k]) e += f[k] * (re[k] * re[k] + im[k] * im[k]) / N; fr[m] = Math.log(e + 1e-6); }
+      frames.push(fr);
+    }
+    const T = Math.max(1, Math.min(EAR_MAXTOK, Math.floor(frames.length / EAR_GROUP))), Fp = EAR_MELS * EAR_GROUP, seq = new Float32Array(T * Fp);
+    for (let t = 0; t < T; t++) for (let g = 0; g < EAR_GROUP; g++) { const fr = frames[Math.min(frames.length - 1, t * EAR_GROUP + g)]; seq.set(fr, t * Fp + g * EAR_MELS); }
+    // summary: mean log-mel in each QUARTER of the clip (order survives), std and mean |Δ| per band, duration
+    const pooled = new Float32Array(SENSE_SPEC.audio.Fq), F = frames.length;
+    for (let m = 0; m < EAR_MELS; m++) {
+      let s = 0, q = 0, d = 0; const qs = [0, 0, 0, 0], qn = [0, 0, 0, 0];
+      for (let i = 0; i < F; i++) { const v = frames[i][m], k = Math.min(3, Math.floor(4 * i / F)); s += v; q += v * v; qs[k] += v; qn[k]++; if (i) d += Math.abs(v - frames[i - 1][m]); }
+      for (let k = 0; k < 4; k++) pooled[k * EAR_MELS + m] = qn[k] ? qs[k] / qn[k] : s / F;
+      pooled[4 * EAR_MELS + m] = Math.sqrt(Math.max(0, q / F - (s / F) ** 2)); pooled[5 * EAR_MELS + m] = F > 1 ? d / (F - 1) : 0;
+    }
+    pooled[6 * EAR_MELS] = Math.log1p(F / 100);
+    return { T, Fp, seq, pooled };
   },
 
   _fft(re, im) {          // in-place radix-2
@@ -2261,70 +2327,93 @@ const SenseFeatures = {
   },
 };
 
-// features (F) -> standardized x̂ = (f − μ)/σ (running stats, like BatchNorm's) -> K prefix vectors in
-// embedding space: prefix_k = W_k·x̂ + b_k (float, Adam, exact gradient). Without standardization the
-// shared part of every image (background) dominates W·f and LayerNorm makes all images look alike.
+// symmetric eigendecomposition (cyclic Jacobi): A = V·diag(vals)·Vᵀ, eigenvectors in V's columns
+function symEig(A, n) {
+  const a = Float64Array.from(A), v = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) v[i * n + i] = 1;
+  for (let sweep = 0; sweep < 60; sweep++) {
+    let off = 0; for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) off += a[p * n + q] ** 2;
+    if (off < 1e-18) break;
+    for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+      const apq = a[p * n + q]; if (Math.abs(apq) < 1e-300) continue;
+      const th = (a[q * n + q] - a[p * n + p]) / (2 * apq);
+      const t = (th >= 0 ? 1 : -1) / (Math.abs(th) + Math.sqrt(th * th + 1)), c = 1 / Math.sqrt(t * t + 1), s = t * c;
+      for (let k = 0; k < n; k++) { const kp = a[k * n + p], kq = a[k * n + q]; a[k * n + p] = c * kp - s * kq; a[k * n + q] = s * kp + c * kq; }
+      for (let k = 0; k < n; k++) { const pk = a[p * n + k], qk = a[q * n + k]; a[p * n + k] = c * pk - s * qk; a[q * n + k] = s * pk + c * qk; }
+      for (let k = 0; k < n; k++) { const kp = v[k * n + p], kq = v[k * n + q]; v[k * n + p] = c * kp - s * kq; v[k * n + q] = s * kp + c * kq; }
+    }
+  }
+  const vals = new Float64Array(n); for (let i = 0; i < n; i++) vals[i] = a[i * n + i];
+  return { vals, vecs: v };
+}
+
+// sense stream -> T prefix vectors in embedding space, prefix_t = W·x̂_t + b + P[t]   (shared W across tokens;
+// P = learned position, eyes only) and a context vector c = C·q̂ (pooled summary, zero at init) that is added
+// to every text token while the sense is present. x̂, q̂: running standardisation (like BatchNorm's).
+// Exact gradient (tests/senses.js); Adam.
 class SenseAdapter {
-  constructor(modality, F, dim, K = SENSE_K) {
-    this.mu = new Float32Array(F); this.var = new Float32Array(F).fill(1); this.nObs = 0;
-    this.modality = modality; this.F = F; this.dim = dim; this.K = K;
-    const n = K * dim * F, sw = 1 / Math.sqrt(F), sb = Math.sqrt(1 / dim) * 0.1;
-    this.W = new Float32Array(n); for (let i = 0; i < n; i++) this.W[i] = (Math.random() * 2 - 1) * sw;
-    this.b = new Float32Array(K * dim); for (let i = 0; i < this.b.length; i++) this.b[i] = (Math.random() * 2 - 1) * sb;
-    this.gW = new Float32Array(n); this.gb = new Float32Array(K * dim);
-    // context map C (dim × F), zero at init: the sense starts out adding nothing to the text
-    // stream and grows in only as fast as it proves useful
-    this.C = new Float32Array(dim * F); this.gC = new Float32Array(dim * F); this.mC = new Float32Array(dim * F); this.vC = new Float32Array(dim * F);
-    this.mW = new Float32Array(n); this.vW = new Float32Array(n); this.mb = new Float32Array(K * dim); this.vb = new Float32Array(K * dim);
+  constructor(modality, spec, dim) {
+    const { Fp, Fq, Tmax, pos } = spec;
+    Object.assign(this, { modality, Fp, Fq, Tmax, usePos: !!pos, dim });
+    const U = (n, a) => { const w = new Float32Array(n); for (let i = 0; i < n; i++) w[i] = (Math.random() * 2 - 1) * a; return w; };
+    this.W = U(dim * Fp, 1 / Math.sqrt(Fp));
+    this.b = U(dim, 0.1 * Math.sqrt(1 / dim));
+    this.P = this.usePos ? U(Tmax * dim, 0.5) : new Float32Array(0);
+    this.C = new Float32Array(dim * Fq);
+    for (const k of ['W', 'b', 'P', 'C']) { const n = this[k].length; this['g' + k] = new Float32Array(n); this['m' + k] = new Float32Array(n); this['v' + k] = new Float32Array(n); }
+    this.mu = new Float32Array(Fp); this.var = new Float32Array(Fp).fill(1); this.nTok = 0;
+    this.muQ = new Float32Array(Fq); this.varQ = new Float32Array(Fq).fill(1); this.nObs = 0;
     this.t = 0; this.trainedSteps = 0;
   }
   observe(f) {                          // update running stats (training only)
+    for (let t = 0; t < f.T; t++) { this.nTok++; const a = Math.max(1 / this.nTok, 1e-3), o = t * this.Fp;
+      for (let i = 0; i < this.Fp; i++) { const x = f.seq[o + i], d = x - this.mu[i]; this.mu[i] += a * d; this.var[i] += a * (d * (x - this.mu[i]) - this.var[i]); } }
     this.nObs++; const a = Math.max(1 / this.nObs, 0.01);
-    for (let i = 0; i < this.F; i++) { const d = f[i] - this.mu[i]; this.mu[i] += a * d; this.var[i] += a * (d * (f[i] - this.mu[i]) - this.var[i]); }
+    for (let i = 0; i < this.Fq; i++) { const x = f.pooled[i], d = x - this.muQ[i]; this.muQ[i] += a * d; this.varQ[i] += a * (d * (x - this.muQ[i]) - this.varQ[i]); }
   }
-  norm(f) {
-    const x = new Float32Array(this.F);
-    for (let i = 0; i < this.F; i++) x[i] = (f[i] - this.mu[i]) / Math.sqrt(this.var[i] + 1e-4);
-    return x;
-  }
-  prefix(fRaw) {
-    const f = this.norm(fRaw), out = [];
-    for (let k = 0; k < this.K; k++) {
-      const v = new Float32Array(this.dim);
-      for (let d = 0; d < this.dim; d++) {
-        const row = (k * this.dim + d) * this.F; let s = this.b[k * this.dim + d];
-        for (let i = 0; i < this.F; i++) s += this.W[row + i] * f[i];
-        v[d] = s;
-      }
+  normTok(f, t) { const x = new Float32Array(this.Fp), o = t * this.Fp; for (let i = 0; i < this.Fp; i++) x[i] = (f.seq[o + i] - this.mu[i]) / Math.sqrt(this.var[i] + 1e-4); return x; }
+  // q̂ is scaled by 1/√Fq: Adam moves every weight by ~LR per step, so an unscaled C·q̂ would grow ~Fq times
+  // faster than a token embedding and drown the text it rides on (measured: |c| swinging 7↔14 vs |embedding| 14)
+  contextInput(f) { const q = new Float32Array(this.Fq), k = 1 / Math.sqrt(this.Fq); for (let i = 0; i < this.Fq; i++) q[i] = k * (f.pooled[i] - this.muQ[i]) / Math.sqrt(this.varQ[i] + 1e-4); return q; }
+  prefix(f) {
+    const out = [], D = this.dim, T = Math.min(f.T, this.Tmax);
+    for (let t = 0; t < T; t++) {
+      const x = this.normTok(f, t), v = new Float32Array(D);
+      for (let d = 0; d < D; d++) { const row = d * this.Fp; let s = this.b[d] + (this.usePos ? this.P[t * D + d] : 0); for (let i = 0; i < this.Fp; i++) s += this.W[row + i] * x[i]; v[d] = s; }
       out.push(v);
     }
     return out;
   }
-  context(fRaw) {                       // c = C·x̂, added to every token's input while the sense is present
-    const f = this.norm(fRaw), c = new Float32Array(this.dim);
-    for (let d = 0; d < this.dim; d++) { const row = d * this.F; let s = 0; for (let i = 0; i < this.F; i++) s += this.C[row + i] * f[i]; c[d] = s; }
+  context(f) {
+    const q = this.contextInput(f), c = new Float32Array(this.dim);
+    for (let d = 0; d < this.dim; d++) { const row = d * this.Fq; let s = 0; for (let i = 0; i < this.Fq; i++) s += this.C[row + i] * q[i]; c[d] = s; }
     return c;
   }
-  accumulateContext(gradVec, xhat) {    // gradVec = dL/d(input of a token step); xhat = norm(f)
-    for (let d = 0; d < this.dim; d++) { const g = gradVec[d]; if (g === 0) continue; const row = d * this.F; for (let i = 0; i < this.F; i++) this.gC[row + i] += g * xhat[i]; }
-  }
-  accumulate(k, gradVec, fRaw) {        // gradVec = dL/d(prefix_k)
-    const f = this.norm(fRaw);
-    for (let d = 0; d < this.dim; d++) {
+  accumulate(t, gradVec, f) {           // gradVec = dL/d(prefix_t)
+    const x = this.normTok(f, t), D = this.dim;
+    for (let d = 0; d < D; d++) {
       const g = gradVec[d]; if (g === 0) continue;
-      const row = (k * this.dim + d) * this.F;
-      this.gb[k * this.dim + d] += g;
-      for (let i = 0; i < this.F; i++) this.gW[row + i] += g * f[i];
+      this.gb[d] += g; if (this.usePos) this.gP[t * D + d] += g;
+      const row = d * this.Fp; for (let i = 0; i < this.Fp; i++) this.gW[row + i] += g * x[i];
     }
   }
+  accumulateContext(gradVec, q) {       // gradVec = dL/d(input of a text step); q = contextInput(f)
+    for (let d = 0; d < this.dim; d++) { const g = gradVec[d]; if (g === 0) continue; const row = d * this.Fq; for (let i = 0; i < this.Fq; i++) this.gC[row + i] += g * q[i]; }
+  }
+  hasGrad() { return this.gW.some(v => v !== 0) || this.gC.some(v => v !== 0); }
   step(lr, b1 = 0.9, b2 = 0.999, eps = 1e-8, wd = 0.01) {
     this.t++; const c1 = 1 - Math.pow(b1, this.t), c2 = 1 - Math.pow(b2, this.t);
-    const upd = (P, G, M, V, decay) => { for (let i = 0; i < P.length; i++) { const g = G[i]; M[i] = b1 * M[i] + (1 - b1) * g; V[i] = b2 * V[i] + (1 - b2) * g * g; P[i] -= lr * (M[i] / c1 / (Math.sqrt(V[i] / c2) + eps) + decay * P[i]); G[i] = 0; } };
-    upd(this.W, this.gW, this.mW, this.vW, wd); upd(this.b, this.gb, this.mb, this.vb, 0); upd(this.C, this.gC, this.mC, this.vC, wd);
+    // CTX_LR_MUL: context-map learning rate relative to the prefix. Measured: 10× re-introduced the
+    // drowning (captions decayed into "a blue creenreenreen…"); 1× is stable, and slower to learn.
+    for (const [k, decay, mul] of [['W', wd, 1], ['b', 0, 1], ['P', 0, 1], ['C', wd, SenseAdapter.CTX_LR_MUL]]) {
+      const P = this[k], G = this['g' + k], M = this['m' + k], V = this['v' + k], lk = lr * mul;
+      for (let i = 0; i < P.length; i++) { const g = G[i]; M[i] = b1 * M[i] + (1 - b1) * g; V[i] = b2 * V[i] + (1 - b2) * g * g; P[i] -= lk * (M[i] / c1 / (Math.sqrt(V[i] / c2) + eps) + decay * P[i]); G[i] = 0; }
+    }
     this.trainedSteps++;
   }
-  zeroGrad() { this.gW.fill(0); this.gb.fill(0); this.gC.fill(0); }
+  zeroGrad() { this.gW.fill(0); this.gb.fill(0); this.gP.fill(0); this.gC.fill(0); }
 }
+SenseAdapter.CTX_LR_MUL = 1;
 
 /* ╔══════════════════════════════════════════════════════════════════╗
    ║         PHASE 1: LittleBit-2 / Joint-ITQ + ModRWKV UPGRADE        ║
@@ -3991,7 +4080,7 @@ class Trainer {
     adapter.observe(features);
     const pre = adapter.prefix(features), K = pre.length, T = tokens.length;
     if (T < 1) return 0;
-    const ctxv = adapter.context(features), xhat = adapter.norm(features);
+    const ctxv = adapter.context(features), xhat = adapter.contextInput(features);
     let state = this.model.getEmptyState();
     const acts = [];
     for (let i = 0; i < K + T - 1; i++) {                 // the last caption token is only a target
@@ -4472,7 +4561,7 @@ const App = {
   _telemetry: [],
 
   // Senses v2 (learned): paired corpus + trainable adapters
-  pairs: [], senses: null, inferSense: null, micRing: null, micRingPos: 0,
+  pairs: [], senses: null, inferSense: null, micRing: null, micRingPos: 0, eyeFilters: null,
   innerMonologue: new InnerMonologue(2, CONFIG.rosa_vocab_size, 64),
 
   // ── ROSA-P-v1: sheafInject wires SimulacraBlock.forward() → InnerMonologue ──
@@ -5344,7 +5433,7 @@ async function initiateTokenizer() {
     await App.tokenizer.train(bpeText, targetVocab);
     App.corpusData = App.tokenizer.encode(App.corpusText.length >= 2 ? App.corpusText : bpeText);
     for (const pr of App.pairs) pr.tokens = App.tokenizer.encode(pr.text);
-    if (App.pairs.length) sysLog(`Senses: ${App.pairs.length} captions tokenized.`, 'ok');
+    if (App.pairs.length) { sysLog(`Senses: ${App.pairs.length} captions tokenized.`, 'ok'); ensureEyeFilters(); }
     document.getElementById('ft-tok').textContent = App.corpusData.length.toLocaleString();
     sysLog(`BPE compiled. Vocab: ${App.tokenizer.size}`, 'ok');
     document.getElementById('btn-alloc').disabled = false;
@@ -5467,7 +5556,7 @@ async function startTraining() {
       if (microStep >= CONFIG.grad_accum_steps) {
         await App.trainer.opt.step(App.model);
         // senses: adapter at 0.1× the model LR (higher rates let the prefix wander and the model learns to ignore it)
-        if (App.senses) for (const a of Object.values(App.senses)) if (a.gW.some(v => v !== 0) || a.gC.some(v => v !== 0)) a.step(App.trainer.opt.lr * 0.1);
+        if (App.senses) for (const a of Object.values(App.senses)) if (a.hasGrad()) a.step(App.trainer.opt.lr * 0.1);
         App.model.embStep((lr * 0.1) / CONFIG.grad_accum_steps);
         App.model.zeroGrad();
 
@@ -5586,34 +5675,62 @@ async function sampleLiveText() {
 }
 
 let activeInference = false;
-/* ── SENSES v2 — app glue ─────────────────────────────────────────── */
+/* ── SENSES v3 — app glue ─────────────────────────────────────────── */
 function makeSenseAdapters(dim) {
-  return { vision: new SenseAdapter('vision', SENSE_DIMS.vision, dim), audio: new SenseAdapter('audio', SENSE_DIMS.audio, dim) };
+  return { vision: new SenseAdapter('vision', SENSE_SPEC.vision, dim), audio: new SenseAdapter('audio', SENSE_SPEC.audio, dim) };
+}
+async function serializeSenses() {
+  if (!App.senses) return null;
+  const b64 = a => bufferToBase64Async(a.buffer), out = { version: 3, adapters: {} };
+  for (const [mod, a] of Object.entries(App.senses)) {
+    const d = { Fp: a.Fp, Fq: a.Fq, Tmax: a.Tmax, usePos: a.usePos, nTok: a.nTok, nObs: a.nObs, trainedSteps: a.trainedSteps };
+    for (const k of ['W', 'b', 'P', 'C', 'mu', 'var', 'muQ', 'varQ']) d[k] = await b64(a[k]);
+    out.adapters[mod] = d;
+  }
+  if (App.eyeFilters) out.eyeFilters = { K: App.eyeFilters.K, mean: await b64(App.eyeFilters.mean), zca: await b64(App.eyeFilters.zca), centroids: await b64(App.eyeFilters.centroids) };
+  return out;
 }
 function loadSenseAdapters(saved, isBase64) {
   const ld = buf => new Float32Array(isBase64 ? base64ToBuffer(buf) : buf);
-  for (const [mod, d] of Object.entries(saved)) {
-    const a = App.senses[mod]; if (!a || d.F !== a.F || d.K !== a.K) { sysLog(`Sense adapter '${mod}' shape mismatch, re-initialised.`, 'warn'); continue; }
-    a.W = ld(d.W); a.b = ld(d.b); if (d.C) a.C = ld(d.C); a.mu = ld(d.mu); a.var = ld(d.var); a.nObs = d.nObs || 0; a.trainedSteps = d.trainedSteps || 0;
+  if (!saved || saved.version !== 3) { sysLog('Saved senses are from an older version (v2 single-vector eyes/ears); starting fresh sense adapters.', 'warn'); return; }
+  for (const [mod, d] of Object.entries(saved.adapters || {})) {
+    const a = App.senses[mod];
+    if (!a || d.Fp !== a.Fp || d.Fq !== a.Fq || d.Tmax !== a.Tmax) { sysLog(`Sense adapter '${mod}' shape mismatch, re-initialised.`, 'warn'); continue; }
+    for (const k of ['W', 'b', 'P', 'C', 'mu', 'var', 'muQ', 'varQ']) a[k] = ld(d[k]);
+    for (const k of ['W', 'b', 'P', 'C']) { const n = a[k].length; a['g' + k] = new Float32Array(n); a['m' + k] = new Float32Array(n); a['v' + k] = new Float32Array(n); }
+    a.nTok = d.nTok || 0; a.nObs = d.nObs || 0; a.trainedSteps = d.trainedSteps || 0;
   }
-  sysLog('Sense adapters restored.', 'ok');
+  if (saved.eyeFilters) App.eyeFilters = { K: saved.eyeFilters.K, mean: ld(saved.eyeFilters.mean), zca: ld(saved.eyeFilters.zca), centroids: ld(saved.eyeFilters.centroids) };
+  sysLog('Sense adapters restored' + (App.eyeFilters ? ' (with learned eye filters).' : '.'), 'ok');
 }
-async function imageDataFromSource(src) {          // File/Blob or a drawable -> ImageData (96×72)
+// eyes learn their texture filters from every image they have, before any caption (unlabeled)
+function ensureEyeFilters() {
+  const imgs = App.pairs.filter(p => p.modality === 'vision' && p.rgb32).map(p => p.rgb32);
+  if (!App.eyeFilters && imgs.length) {
+    App.eyeFilters = SenseFeatures.learnEyeFilters(imgs);
+    if (App.eyeFilters) sysLog(`Eyes: learned ${App.eyeFilters.K} texture filters from ${imgs.length} images (ZCA + k-means).`, 'ok');
+  }
+  for (const p of App.pairs) if (p.modality === 'vision' && p.rgb32) p.features = SenseFeatures.imageTokens(p.rgb32, App.eyeFilters);
+}
+async function imageDataFromSource(src) {          // File/Blob or a drawable -> ImageData (128×96)
   const bmp = (src instanceof Blob) ? await createImageBitmap(src) : src;
-  const c = document.createElement('canvas'); c.width = 96; c.height = 72;
-  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(bmp, 0, 0, 96, 72);
-  return g.getImageData(0, 0, 96, 72);
+  const c = document.createElement('canvas'); c.width = 128; c.height = 96;
+  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(bmp, 0, 0, 128, 96);
+  return g.getImageData(0, 0, 128, 96);
 }
 async function audioPcmFromFile(file) {
-  const sr = 22050, ctx = new OfflineAudioContext(1, sr, sr);
+  const ctx = new OfflineAudioContext(1, EAR_SR, EAR_SR);   // decodes and resamples to 16 kHz
   const buf = await ctx.decodeAudioData(await file.arrayBuffer());
   const n = buf.length, out = new Float32Array(n);
   for (let ch = 0; ch < buf.numberOfChannels; ch++) { const d = buf.getChannelData(ch); for (let i = 0; i < n; i++) out[i] += d[i] / buf.numberOfChannels; }
   return { pcm: out, sr: buf.sampleRate };
 }
 async function senseFromFile(file) {
-  if (file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name)) return { modality: 'vision', features: SenseFeatures.image(await imageDataFromSource(file)) };
-  if (file.type.startsWith('audio/') || /\.(wav|mp3|ogg|flac|m4a|aac|webm)$/i.test(file.name)) { const { pcm, sr } = await audioPcmFromFile(file); return { modality: 'audio', features: SenseFeatures.audio(pcm, sr) }; }
+  if (file.type.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name)) {
+    const rgb32 = SenseFeatures.image32(await imageDataFromSource(file));
+    return { modality: 'vision', rgb32, features: SenseFeatures.imageTokens(rgb32, App.eyeFilters) };
+  }
+  if (file.type.startsWith('audio/') || /\.(wav|mp3|ogg|flac|m4a|aac|webm)$/i.test(file.name)) { const { pcm, sr } = await audioPcmFromFile(file); return { modality: 'audio', features: SenseFeatures.audioTokens(pcm, sr) }; }
   return null;
 }
 async function loadSensePairs(fileList) {
@@ -5629,11 +5746,12 @@ async function loadSensePairs(fileList) {
       if (!sense) { skipped.push(f.name); continue; }
       const text = (await tf.text()).trim();
       if (!text) { skipped.push(f.name); continue; }
-      App.pairs.push({ name: f.name, modality: sense.modality, features: sense.features, text, tokens: App.tokenizer.trained ? App.tokenizer.encode(text) : null });
+      App.pairs.push({ name: f.name, modality: sense.modality, rgb32: sense.rgb32 || null, features: sense.features, text, tokens: App.tokenizer.trained ? App.tokenizer.encode(text) : null });
       added++;
     } catch (e) { skipped.push(`${f.name} (${e.message})`); }
     await yieldToMain();
   }
+  if (App.tokenizer.trained) ensureEyeFilters();
   const nV = App.pairs.filter(p => p.modality === 'vision').length, nA = App.pairs.length - nV;
   document.getElementById('sense-status').textContent = `${App.pairs.length} pairs (${nV} images, ${nA} sounds).` + (skipped.length ? ` Skipped ${skipped.length} without a matching .txt: ${skipped.slice(0, 4).join(', ')}${skipped.length > 4 ? '…' : ''}` : '') + (App.tokenizer.trained ? '' : ' Now compile BPE.');
   sysLog(`Senses: +${added} pairs (${skipped.length} skipped).`, added ? 'ok' : 'warn');
@@ -5660,20 +5778,24 @@ async function setInferenceSenseFile(file) {
 }
 async function getInferenceSense() {
   const mode = document.getElementById('inf-sense')?.value || 'none';
-  if (mode === 'file') return App.inferSense;
+  if (mode === 'file') {
+    const s = App.inferSense;   // re-encode with the current eye filters (they may have been learned since the file was chosen)
+    if (s && s.rgb32) s.features = SenseFeatures.imageTokens(s.rgb32, App.eyeFilters);
+    return s;
+  }
   if (mode === 'camera') {
     const v = document.getElementById('webcam-el');
     if (!cameraActive || !v || v.readyState < 2) throw new Error('camera is not running');
-    return { modality: 'vision', features: SenseFeatures.image(await imageDataFromSource(v)) };
+    const rgb32 = SenseFeatures.image32(await imageDataFromSource(v));
+    return { modality: 'vision', rgb32, features: SenseFeatures.imageTokens(rgb32, App.eyeFilters) };
   }
   if (mode === 'mic') {
     if (!micActive || !App.micRing) throw new Error('microphone is not running');
     const r = App.micRing, ord = new Float32Array(r.length); for (let i = 0; i < r.length; i++) ord[i] = r[(App.micRingPos + i) % r.length];
-    return { modality: 'audio', features: SenseFeatures.audio(ord, audioCtx ? audioCtx.sampleRate : 44100) };
+    return { modality: 'audio', features: SenseFeatures.audioTokens(ord, audioCtx ? audioCtx.sampleRate : 44100) };
   }
   return null;
 }
-
 async function startInference() {
   if (!App.model) return sysLog('Model required.', 'error');
   activeInference = true;
@@ -5942,13 +6064,8 @@ async function exportModel() {
   // .simpip: rosa_states (optional — include if blocks have accumulated history)
   state.rosa_states = App.model.blocks.map(b => b.getRosaState());
 
-  if (App.senses) {
-    state.senses = {};
-    for (const [mod, a] of Object.entries(App.senses)) state.senses[mod] = {
-      F: a.F, K: a.K, nObs: a.nObs, trainedSteps: a.trainedSteps,
-      W: await bufferToBase64Async(a.W.buffer), b: await bufferToBase64Async(a.b.buffer), C: await bufferToBase64Async(a.C.buffer),
-      mu: await bufferToBase64Async(a.mu.buffer), var: await bufferToBase64Async(a.var.buffer) };
-  }
+  const sensesState = await serializeSenses();
+  if (sensesState) state.senses = sensesState;
 
   const filename = buildExportFilename(fmt);
   const blob = new Blob([JSON.stringify(state)], { type: 'application/json' });
@@ -6064,7 +6181,7 @@ function hydrateFromData(data, isBase64) {
   App.audioAdapter   = new ModRWKVAdapter(64, data.cfg.dim, 'audio');
   App.spatialAdapter = new ModRWKVAdapter(64, data.cfg.dim, 'spatial');
   App.rift = new RIFTEngine(data.cfg.dim);
-  App.senses = makeSenseAdapters(data.cfg.dim);
+  App.senses = makeSenseAdapters(data.cfg.dim); App.eyeFilters = null;
   if (data.senses) loadSenseAdapters(data.senses, isBase64);
   // Reinit InnerMonologue with correct layer count and dim
   App.innerMonologue = new InnerMonologue(

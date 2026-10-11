@@ -13,7 +13,7 @@ module.exports = function load(opts = {}) {
     cut('class TMAC {', 'class LittleBit2'),                   // TMAC … LanguageModel (+ helpers between)
     cut('class Trainer {', '/* ╔'),                           // Trainer (OOMB chunk-recurrent BPTT)
     cut('function ROSA(x) {', 'const App = {'),                // ROSA, ROSAChannel, ROSAEmbed, InnerMonologue
-    'this.M = { CONFIG, TMAC, BitLinear, LayerNorm, AdamOptimizer, MuonOptimizer, SimulacraBlock, LanguageModel, Trainer, ROSA, ROSAChannel, ROSAEmbed, SenseAdapter, SenseFeatures };',
+    'this.M = { CONFIG, TMAC, BitLinear, LayerNorm, AdamOptimizer, MuonOptimizer, SimulacraBlock, LanguageModel, Trainer, ROSA, ROSAChannel, ROSAEmbed, SenseAdapter, SenseFeatures, SENSE_SPEC, symEig };',
   ].join('\n');
   const noop = () => 0;
   const ctx = { setInterval: noop, clearInterval: noop, requestAnimationFrame: noop, Math, Float32Array: opts.f64 ? Float64Array : Float32Array, Float64Array, Int32Array, Uint8Array, Uint32Array, Int8Array, Array, Object, Promise, setTimeout, console, document: undefined };

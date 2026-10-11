@@ -196,6 +196,7 @@ Predecessor credits: BlinkDL (RWKV-v8 ROSA research — Simulacra's ROSA-primary
 
 ## Changelog
 
+- **Senses v3 (2026-10-11 · Kehai Interim, from Evangelion Phase 7.1):** eyes and ears as token streams. 32×32 images become 16 patch tokens with texture filters learned from your own images; sounds become a 16 kHz, 40-mel stream, one token per 40 ms, so the ORDER of sounds is kept (a linear probe hears vowel order at 100%, vs 83% for the old averaged ears). The context summary keeps coarse place and time. Honest note: higher resolution alone did not improve small-detail vision; that needs learned depth (next). See Evangelion's release notes for the full measurements. Tests: `tests/senses.js`, `tests/senses-probe.js`, `tests/senses-learn.js`.
 - **Senses, learned (2026-10-11 · Kehai Interim, ported from Evangelion Phase 7):** images and sounds become K=4 prefix vectors in embedding space that the model reads *before* text. Each sense also adds a context vector to every token's input while it is present, so what the model perceives stays in view instead of having to be remembered.
 
 - **Train on a paired corpus:** drop `photo.jpg` + `photo.txt`, `clip.wav` + `clip.txt` (matched by name) into the SENSES panel.
